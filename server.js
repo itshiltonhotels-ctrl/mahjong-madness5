@@ -123,7 +123,7 @@ http.createServer(async (req, res) => {
       return res.end(`<meta name=viewport content="width=device-width"><body style="font:14px sans-serif;padding:16px"><h2>Mahjong Madness bookings</h2><p><a href="/admin/export.csv">Export CSV</a> · ${rows.length} total</p><div style="overflow-x:auto"><table border=1 cellpadding=6 style="border-collapse:collapse"><tr><th>Ref<th>Date<th>Time<th>Guest<th>Mobile<th>Email<th>Players<th>Type<th>Table<th>Sets<th>Total<th>Payment<th>Status<th>Requests<th>Email status</tr>${rows.map(r => `<tr><td>${r.id}<td>${r.date}<td>${rng(r.start)}<td>${esc(r.name)}<td>${r.phone}<td>${esc(r.email)}<td>${r.players}<td>${typeLbl(r.type)}<td>${r.tbl + 1}<td>${r.sets}<td>₹${r.total}<td>${r.pay_method} (${r.pay_status})<td>${r.status}<td>${esc(r.requests)}<td>${r.email_status || ''}</tr>`).join('')}</table></div>`);
     }
 
-    if (url.pathname === '/' || url.pathname === '/index.html') { const page = fs.readFileSync(new URL('./public/index.html', import.meta.url)); res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); return res.end(page); }
+    if (url.pathname === '/' || url.pathname === '/index.html') { const page = fs.readFileSync(new URL('./index.html', import.meta.url)); res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); return res.end(page); }
     res.writeHead(404); res.end('Not found');
   } catch (e) { console.error(e); if (res.headersSent) return res.end(); json(res, 500, { error: 'Something went wrong. Please try again.' }); }
 }).listen(PORT, () => console.log('Mahjong Madness running on :' + PORT));
