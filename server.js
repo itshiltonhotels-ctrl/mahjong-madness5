@@ -16,9 +16,10 @@ db.exec(`CREATE TABLE IF NOT EXISTS bookings(
  status TEXT DEFAULT 'confirmed', requests TEXT, cancelled_at TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, email_status TEXT)`);
 
 for (const c of ['hold_until INTEGER', 'order_id TEXT', 'payment_id TEXT']) { try { db.exec('ALTER TABLE bookings ADD COLUMN ' + c); } catch {} }
-const HOLD = +(E.HOLD_MINUTES || 10), RZP = () => !!(E.RAZORPAY_KEY_ID && E.RAZORPAY_KEY_SECRET);
+const HOLD = +(E.HOLD_MINUTES || 10), PAYU = () => !!(E.PAYU_KEY && E.PAYU_SALT);
+const sha512 = t => crypto.createHash('sha512').update(t).digest('hex');
 const safeEq = (a, b) => { a = Buffer.from(String(a)); b = Buffer.from(String(b)); return a.length === b.length && crypto.timingSafeEqual(a, b); };
-const rawBody = req => new Promise((ok, no) => { let d = ''; req.on('data', c => { d += c; if (d.length > 1e5) { req.destroy(); no(); } }); req.on('end', () => ok(d)); });
+const formBody = req => new Promise((ok, no) => { let d = ''; req.on('data', c => { d += c; if (d.length > 1e5) { req.destroy(); no(); } }); req.on('end', () => { try { ok((req.headers['content-type'] || '').includes('json') ? JSON.parse(d) : Object.fromEntries(new URLSearchParams(d))); } catch { ok({}); } }); });
 const pad = n => String(n).padStart(2, '0');
 const fmt = m => { const h = Math.floor(m / 60), mm = m % 60; return (h % 12 || 12) + (mm ? ':' + pad(mm) : '') + ' ' + (h < 12 ? 'AM' : 'PM'); };
 const rng = s => fmt(s) + ' – ' + fmt(s + CFG.dur);
@@ -63,12 +64,35 @@ async function notifyCancelled(b) {
   await sendMail(STAFF_EMAIL, `CANCELLED ${b.id}: ${b.date} ${rng(b.start)}`, `<p>Booking cancelled by guest.</p><p>${details(b)}</p><p>Guest: ${esc(b.name)}, ${esc(b.phone)}</p>`);
 }
 
-async function createOrder(b) {
-  const r = await fetch('https://api.razorpay.com/v1/orders', { method: 'POST', headers: { Authorization: 'Basic ' + Buffer.from(E.RAZORPAY_KEY_ID + ':' + E.RAZORPAY_KEY_SECRET).toString('base64'), 'Content-Type': 'application/json' }, body: JSON.stringify({ amount: b.total * 100, currency: 'INR', receipt: b.id, notes: { booking: b.id } }) });
-  const j = await r.json();
-  if (!r.ok) throw new Error((j.error && j.error.description) || 'Razorpay error');
-  db.prepare('UPDATE bookings SET order_id=? WHERE id=?').run(j.id, b.id);
-  return { id: j.id, amount: j.amount, currency: j.currency, key: E.RAZORPAY_KEY_ID };
+// ---- PayU: build the signed payment form (the salt never leaves the server) ----
+function payuStart(b, req) {
+  const txnid = b.id.replace(/\W/g, '') + 'T' + crypto.randomBytes(2).toString('hex');
+  db.prepare('UPDATE bookings SET order_id=? WHERE id=?').run(txnid, b.id);
+  const amount = Number(b.total).toFixed(2), productinfo = 'Mahjong Madness game';
+  const firstname = String(b.name).replace(/[^A-Za-z0-9 ]/g, '').slice(0, 40) || 'Guest';
+  const base = E.PUBLIC_URL || ('https://' + req.headers.host);
+  const f = { key: E.PAYU_KEY, txnid, amount, productinfo, firstname, email: b.email, phone: b.phone, surl: base + '/api/payu/return', furl: base + '/api/payu/return', udf1: b.id };
+  f.hash = sha512([f.key, txnid, amount, productinfo, firstname, b.email, b.id, '', '', '', '', '', '', '', '', '', E.PAYU_SALT].join('|'));
+  return { action: (E.PAYU_ENV === 'test' ? 'https://test.payu.in' : 'https://secure.payu.in') + '/_payment', fields: f };
+}
+async function verifyPayu(txnid) {
+  const cmd = 'verify_payment';
+  const r = await fetch((E.PAYU_ENV === 'test' ? 'https://test.payu.in' : 'https://info.payu.in') + '/merchant/postservice?form=2', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ key: E.PAYU_KEY, command: cmd, var1: txnid, hash: sha512([E.PAYU_KEY, cmd, txnid, E.PAYU_SALT].join('|')) }) });
+  return r.json();
+}
+// Checks PayU's reply (reverse hash + amount + reconciliation) and confirms the booking only if genuine.
+async function handlePayu(p) {
+  const id = p.udf1 || '';
+  const b = db.prepare('SELECT * FROM bookings WHERE id=? AND order_id=?').get(id, p.txnid || '');
+  if (!b || !PAYU()) return { ok: false, id };
+  const rev = [E.PAYU_SALT, p.status, '', '', '', '', '', p.udf5 || '', p.udf4 || '', p.udf3 || '', p.udf2 || '', p.udf1 || '', p.email, p.firstname, p.productinfo, p.amount, p.txnid, E.PAYU_KEY];
+  if (p.additionalCharges) rev.unshift(p.additionalCharges);
+  if (!safeEq(sha512(rev.join('|')), String(p.hash || '').toLowerCase())) { console.error('PayU hash mismatch for', id); return { ok: false, id }; }
+  if (p.status !== 'success' || Number(p.amount) !== Number(b.total)) return { ok: false, id };
+  try { const v = await verifyPayu(p.txnid), t = v && v.transaction_details && v.transaction_details[p.txnid]; if (t && t.status && t.status !== 'success') return { ok: false, id }; }
+  catch (e) { console.error('PayU verify_payment unreachable, relying on signed reply', e.message); }
+  const r = await confirmPaid(b.id, p.mihpayid || '');
+  return { ok: !!r && !r.problem, id };
 }
 // Confirms a booking after VERIFIED payment (called from verify endpoint and webhook). Safe to call twice.
 async function confirmPaid(id, paymentId) {
@@ -103,29 +127,30 @@ http.createServer(async (req, res) => {
     if (url.pathname === '/api/occupancy') // anonymised: no guest data
       return json(res, 200, db.prepare(`SELECT id,date,start,players,type,tbl AS "table",sets,status FROM bookings WHERE (status='confirmed' OR (status='held' AND hold_until>${Date.now()})) AND date>=?`).all(istNow().d));
 
-    if (url.pathname === '/api/config') return json(res, 200, { enabled: RZP(), test: (E.RAZORPAY_KEY_ID || '').startsWith('rzp_test_') });
+    if (url.pathname === '/api/config') return json(res, 200, { enabled: PAYU(), test: E.PAYU_ENV === 'test' });
 
-    if (url.pathname === '/api/pay/verify' && req.method === 'POST') {
+    if (url.pathname === '/api/pay/start' && req.method === 'POST') { // retry payment for a held booking
       const x = await body(req);
-      const b = db.prepare('SELECT * FROM bookings WHERE id=? AND order_id=?').get(x.booking_id || '', x.razorpay_order_id || '');
-      if (!b || !RZP()) return json(res, 404, { error: 'Booking not found.' });
-      const sig = crypto.createHmac('sha256', E.RAZORPAY_KEY_SECRET).update(b.order_id + '|' + (x.razorpay_payment_id || '')).digest('hex');
-      if (!safeEq(sig, x.razorpay_signature || '')) return json(res, 400, { error: 'Payment could not be verified. If money was deducted, please contact our booking team with reference ' + b.id + '.' });
-      const r = await confirmPaid(b.id, x.razorpay_payment_id);
-      if (!r || r.problem) return json(res, 409, { error: 'Your payment was received but the table could not be held. Our team will contact you. Reference ' + b.id });
-      return json(res, 200, { booking: r });
+      const b = db.prepare(`SELECT * FROM bookings WHERE id=? AND lower(email)=lower(?) AND status='held'`).get(x.id || '', x.email || '');
+      if (!b || !PAYU()) return json(res, 404, { error: 'Booking not found.' });
+      if (b.hold_until < Date.now()) return json(res, 410, { error: 'Your table hold has expired. Please make a new booking.' });
+      return json(res, 200, { payu: payuStart(b, req) });
     }
 
-    if (url.pathname === '/api/razorpay-webhook' && req.method === 'POST') {
-      const raw = await rawBody(req);
-      const exp = crypto.createHmac('sha256', E.RAZORPAY_WEBHOOK_SECRET || '').update(raw).digest('hex');
-      if (!E.RAZORPAY_WEBHOOK_SECRET || !safeEq(exp, req.headers['x-razorpay-signature'] || '')) { res.writeHead(400); return res.end('bad signature'); }
-      const ev = JSON.parse(raw), pay = ev.payload && ev.payload.payment && ev.payload.payment.entity;
-      if (['payment.captured', 'order.paid'].includes(ev.event)) {
-        const oid = (pay && pay.order_id) || (ev.payload.order && ev.payload.order.entity.id);
-        const b = db.prepare('SELECT id FROM bookings WHERE order_id=?').get(oid || '');
-        if (b) await confirmPaid(b.id, (pay && pay.id) || '');
-      }
+    if (url.pathname === '/api/booking/status' && req.method === 'POST') {
+      const x = await body(req);
+      const b = db.prepare(`SELECT * FROM bookings WHERE id=? AND lower(email)=lower(?) AND status='confirmed'`).get(x.id || '', x.email || '');
+      return b ? json(res, 200, { booking: b }) : json(res, 404, { error: 'Booking not confirmed yet.' });
+    }
+
+    if (url.pathname === '/api/payu/return' && req.method === 'POST') { // guest is sent back here by PayU
+      const r = await handlePayu(await formBody(req));
+      res.writeHead(303, { Location: '/?pay=' + (r.ok ? 'success' : 'failed') + '&ref=' + encodeURIComponent(r.id || '') });
+      return res.end();
+    }
+
+    if (url.pathname === '/api/payu/webhook' && req.method === 'POST') { // server-to-server backup from PayU
+      await handlePayu(await formBody(req));
       res.writeHead(200); return res.end('ok');
     }
 
@@ -144,7 +169,7 @@ http.createServer(async (req, res) => {
       if (!x.agreed) errs.push('Terms must be accepted.');
       if (errs.length) return json(res, 400, { error: errs.join(' ') });
       const online = x.pay === 'online';
-      if (online && !RZP()) return json(res, 400, { error: 'Online payment is not available right now. Please choose pay at venue.' });
+      if (online && !PAYU()) return json(res, 400, { error: 'Online payment is not available right now. Please choose pay at venue.' });
       let b;
       db.exec('BEGIN IMMEDIATE'); // atomic: no two guests can take the same capacity
       try {
@@ -155,10 +180,7 @@ http.createServer(async (req, res) => {
           .run(b.id, b.name, b.phone, b.email, b.date, b.start, b.players, b.type, b.tbl, b.sets, b.game_fee, b.rental_fee, b.total, b.pay_method, b.pay_status, b.requests, online ? 'held' : 'confirmed', online ? Date.now() + HOLD * 60000 : null);
         db.exec('COMMIT');
       } catch (e) { db.exec('ROLLBACK'); throw e; }
-      if (online) {
-        try { const order = await createOrder(b); return json(res, 201, { booking: b, order, holdMinutes: HOLD }); }
-        catch (e) { db.prepare(`UPDATE bookings SET status='failed' WHERE id=?`).run(b.id); console.error(e); return json(res, 502, { error: 'Could not start the payment. Please try again or choose pay at venue.' }); }
-      }
+      if (online) return json(res, 201, { booking: b, payu: payuStart(b, req), holdMinutes: HOLD });
       notifyBooked(b); // async, booking is already saved
       return json(res, 201, { booking: b });
     }
