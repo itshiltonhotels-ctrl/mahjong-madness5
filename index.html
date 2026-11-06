@@ -186,4 +186,29 @@ function listMine(){let m=[];try{m=JSON.parse(localStorage.getItem('mm_mine')||'
 async function cancel(id){let m=[];try{m=JSON.parse(localStorage.getItem('mm_mine')||'[]')}catch(e){}const b=m.find(x=>x.id===id);if(!b)return;
  try{await API('/api/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,email:b.email})});b.gone=true;localStorage.setItem('mm_mine',JSON.stringify(m));listMine();loadOcc()}catch(e){alert(e.message)}}
 listMine();loadOcc();
+</script><script>
+// ---- Razorpay online payment (verified on the server before confirming) ----
+let PAY='venue',PEND=null,CFGR={enabled:false};
+const po=[...document.querySelectorAll('#bk .opts')].pop(),[bo,bv]=po.children;bo.dataset.pay='online';bv.dataset.pay='venue';
+API('/api/config').then(c=>{CFGR=c;if(c.enabled){bo.disabled=false;bo.innerHTML='<b>PAY ONLINE</b>Pay securely through the configured payment gateway.'+(c.test?' <b>(Test mode: no real money is charged.)</b>':'')}else bo.lastChild.textContent=' Not available yet: payment gateway not configured.'}).catch(()=>{});
+document.addEventListener('click',e=>{const b=e.target.closest('[data-pay]');if(!b||b.disabled)return;PAY=b.dataset.pay;po.querySelectorAll('[data-pay]').forEach(x=>x.setAttribute('aria-pressed',x===b));$('go').textContent=PAY==='online'?'PAY ONLINE & BOOK':'BOOK YOUR TABLE.'});
+function loadRzp(){return window.Razorpay?Promise.resolve():new Promise((ok,no)=>{const s=document.createElement('script');s.src='https://checkout.razorpay.com/v1/checkout.js';s.onload=ok;s.onerror=no;document.head.appendChild(s)})}
+function finish(b){const v={id:b.id,name:b.name,date:b.date,start:b.start,players:b.players,type:b.type,sets:b.sets,pay:b.pay_method,payStatus:b.pay_status,total:b.total,email:b.email};
+ try{const m=JSON.parse(localStorage.getItem('mm_mine')||'[]');m.push(v);localStorage.setItem('mm_mine',JSON.stringify(m))}catch(e){}
+ $('msg').className='msg';if($('rb'))$('rb').hidden=true;showDone(v);listMine()}
+function retryUI(t){err(t);let r=$('rb');if(!r){r=document.createElement('button');r.id='rb';r.className='btn';r.style.marginTop='10px';r.textContent='RETRY PAYMENT';r.onclick=openPay;$('msg').after(r)}r.hidden=false}
+function openPay(){const{b,o}=PEND;loadRzp().then(()=>{const rz=new Razorpay({key:o.key,amount:o.amount,currency:o.currency,order_id:o.id,name:'Mahjong Madness',description:'Booking '+b.id,prefill:{name:b.name,email:b.email,contact:b.phone},theme:{color:'#101F46'},
+ handler:async resp=>{try{const r=await API('/api/pay/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({booking_id:b.id,...resp})});PEND=null;finish(r.booking);loadOcc()}catch(e){err(e.message)}},
+ modal:{ondismiss:()=>retryUI('Payment not completed. Your table is held for a few minutes. You can retry.')}});
+ rz.on('payment.failed',r=>retryUI('Payment failed: '+((r.error&&r.error.description)||'please try again.')));rz.open()}).catch(()=>retryUI('Could not load the payment window. Please check your connection and retry.'))}
+$('go').onclick=async()=>{const x=total(),nm=$('nm').value.trim(),ph=$('ph').value.replace(/\D/g,''),em=$('em').value.trim();
+ if(!S.date||S.start==null)return err('Please choose a date and time.');
+ if(nm.length<2)return err('Please enter your full name.');
+ if(!/^(91)?[6-9]\d{9}$/.test(ph))return err('Please enter a valid 10-digit Indian mobile number.');
+ if(!/^\S+@\S+\.\S+$/.test(em))return err('Please enter a valid email address.');
+ if(!$('ag').checked)return err('Please agree to the booking terms and cancellation policy.');
+ $('go').disabled=true;
+ try{const r=await API('/api/bookings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:nm,phone:ph,email:em,date:S.date,start:S.start,players:x.n,type:S.type,sets:x.q,requests:$('rq').value,agreed:true,pay:PAY})});
+  if(r.order){PEND={b:r.booking,o:r.order};$('msg').className='msg';openPay()}else finish(r.booking)}catch(e){err(e.message)}
+ $('go').disabled=false;await loadOcc()};
 </script></body></html>

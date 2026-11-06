@@ -15,6 +15,10 @@ db.exec(`CREATE TABLE IF NOT EXISTS bookings(
  games INTEGER DEFAULT 1, pay_method TEXT DEFAULT 'Pay at venue', pay_status TEXT DEFAULT 'Pending',
  status TEXT DEFAULT 'confirmed', requests TEXT, cancelled_at TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, email_status TEXT)`);
 
+for (const c of ['hold_until INTEGER', 'order_id TEXT', 'payment_id TEXT']) { try { db.exec('ALTER TABLE bookings ADD COLUMN ' + c); } catch {} }
+const HOLD = +(E.HOLD_MINUTES || 10), RZP = () => !!(E.RAZORPAY_KEY_ID && E.RAZORPAY_KEY_SECRET);
+const safeEq = (a, b) => { a = Buffer.from(String(a)); b = Buffer.from(String(b)); return a.length === b.length && crypto.timingSafeEqual(a, b); };
+const rawBody = req => new Promise((ok, no) => { let d = ''; req.on('data', c => { d += c; if (d.length > 1e5) { req.destroy(); no(); } }); req.on('end', () => ok(d)); });
 const pad = n => String(n).padStart(2, '0');
 const fmt = m => { const h = Math.floor(m / 60), mm = m % 60; return (h % 12 || 12) + (mm ? ':' + pad(mm) : '') + ' ' + (h < 12 ? 'AM' : 'PM'); };
 const rng = s => fmt(s) + ' – ' + fmt(s + CFG.dur);
@@ -22,7 +26,7 @@ const istNow = () => { const p = new Date().toLocaleString('sv-SE', { timeZone: 
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 function overlapping(date, s, ignore) {
-  return db.prepare(`SELECT * FROM bookings WHERE status='confirmed' AND date=? AND id<>? AND ABS(start-?)<?`).all(date, ignore || '', s, CFG.dur);
+  return db.prepare(`SELECT * FROM bookings WHERE (status='confirmed' OR (status='held' AND hold_until>?)) AND date=? AND id<>? AND ABS(start-?)<?`).all(Date.now(), date, ignore || '', s, CFG.dur);
 }
 function allocate(date, s, type, n, sets, ignore) {
   const ex = overlapping(date, s, ignore);
@@ -59,6 +63,33 @@ async function notifyCancelled(b) {
   await sendMail(STAFF_EMAIL, `CANCELLED ${b.id}: ${b.date} ${rng(b.start)}`, `<p>Booking cancelled by guest.</p><p>${details(b)}</p><p>Guest: ${esc(b.name)}, ${esc(b.phone)}</p>`);
 }
 
+async function createOrder(b) {
+  const r = await fetch('https://api.razorpay.com/v1/orders', { method: 'POST', headers: { Authorization: 'Basic ' + Buffer.from(E.RAZORPAY_KEY_ID + ':' + E.RAZORPAY_KEY_SECRET).toString('base64'), 'Content-Type': 'application/json' }, body: JSON.stringify({ amount: b.total * 100, currency: 'INR', receipt: b.id, notes: { booking: b.id } }) });
+  const j = await r.json();
+  if (!r.ok) throw new Error((j.error && j.error.description) || 'Razorpay error');
+  db.prepare('UPDATE bookings SET order_id=? WHERE id=?').run(j.id, b.id);
+  return { id: j.id, amount: j.amount, currency: j.currency, key: E.RAZORPAY_KEY_ID };
+}
+// Confirms a booking after VERIFIED payment (called from verify endpoint and webhook). Safe to call twice.
+async function confirmPaid(id, paymentId) {
+  const b = db.prepare('SELECT * FROM bookings WHERE id=?').get(id);
+  if (!b) return null;
+  if (b.status === 'confirmed') return b;
+  if (b.status !== 'held') return { ...b, problem: true };
+  if (b.hold_until < Date.now()) { // hold expired: only confirm if capacity is still free
+    const t = allocate(b.date, b.start, b.type, b.players, b.sets, b.id);
+    if (t < 0) {
+      db.prepare(`UPDATE bookings SET status='paid_conflict',payment_id=?,pay_status='Paid - NEEDS REFUND' WHERE id=?`).run(paymentId, b.id);
+      sendMail(STAFF_EMAIL, 'ACTION NEEDED: paid booking ' + b.id + ' has no free table', '<p>The guest paid after the hold expired and the slot was taken. Please contact ' + esc(b.name) + ', ' + esc(b.phone) + ' and arrange a refund. Payment ID: ' + esc(paymentId) + '</p>');
+      return { ...b, problem: true };
+    }
+    db.prepare('UPDATE bookings SET tbl=? WHERE id=?').run(t, b.id);
+  }
+  db.prepare(`UPDATE bookings SET status='confirmed',pay_status='Paid',payment_id=?,hold_until=NULL WHERE id=?`).run(paymentId, b.id);
+  const nb = db.prepare('SELECT * FROM bookings WHERE id=?').get(b.id);
+  notifyBooked(nb);
+  return nb;
+}
 function json(res, code, o) { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(o)); }
 const body = req => new Promise((ok, no) => { let d = ''; req.on('data', c => { d += c; if (d.length > 2e4) { req.destroy(); no(); } }); req.on('end', () => { try { ok(JSON.parse(d || '{}')); } catch { no(); } }); });
 function authed(req) {
@@ -70,7 +101,33 @@ http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
   try {
     if (url.pathname === '/api/occupancy') // anonymised: no guest data
-      return json(res, 200, db.prepare(`SELECT id,date,start,players,type,tbl AS "table",sets,status FROM bookings WHERE status='confirmed' AND date>=?`).all(istNow().d));
+      return json(res, 200, db.prepare(`SELECT id,date,start,players,type,tbl AS "table",sets,status FROM bookings WHERE (status='confirmed' OR (status='held' AND hold_until>${Date.now()})) AND date>=?`).all(istNow().d));
+
+    if (url.pathname === '/api/config') return json(res, 200, { enabled: RZP(), test: (E.RAZORPAY_KEY_ID || '').startsWith('rzp_test_') });
+
+    if (url.pathname === '/api/pay/verify' && req.method === 'POST') {
+      const x = await body(req);
+      const b = db.prepare('SELECT * FROM bookings WHERE id=? AND order_id=?').get(x.booking_id || '', x.razorpay_order_id || '');
+      if (!b || !RZP()) return json(res, 404, { error: 'Booking not found.' });
+      const sig = crypto.createHmac('sha256', E.RAZORPAY_KEY_SECRET).update(b.order_id + '|' + (x.razorpay_payment_id || '')).digest('hex');
+      if (!safeEq(sig, x.razorpay_signature || '')) return json(res, 400, { error: 'Payment could not be verified. If money was deducted, please contact our booking team with reference ' + b.id + '.' });
+      const r = await confirmPaid(b.id, x.razorpay_payment_id);
+      if (!r || r.problem) return json(res, 409, { error: 'Your payment was received but the table could not be held. Our team will contact you. Reference ' + b.id });
+      return json(res, 200, { booking: r });
+    }
+
+    if (url.pathname === '/api/razorpay-webhook' && req.method === 'POST') {
+      const raw = await rawBody(req);
+      const exp = crypto.createHmac('sha256', E.RAZORPAY_WEBHOOK_SECRET || '').update(raw).digest('hex');
+      if (!E.RAZORPAY_WEBHOOK_SECRET || !safeEq(exp, req.headers['x-razorpay-signature'] || '')) { res.writeHead(400); return res.end('bad signature'); }
+      const ev = JSON.parse(raw), pay = ev.payload && ev.payload.payment && ev.payload.payment.entity;
+      if (['payment.captured', 'order.paid'].includes(ev.event)) {
+        const oid = (pay && pay.order_id) || (ev.payload.order && ev.payload.order.entity.id);
+        const b = db.prepare('SELECT id FROM bookings WHERE order_id=?').get(oid || '');
+        if (b) await confirmPaid(b.id, (pay && pay.id) || '');
+      }
+      res.writeHead(200); return res.end('ok');
+    }
 
     if (url.pathname === '/api/bookings' && req.method === 'POST') {
       const x = await body(req), n = +x.players, q = +x.sets || 0, now = istNow();
@@ -86,16 +143,22 @@ http.createServer(async (req, res) => {
       if (!/^\S+@\S+\.\S+$/.test(x.email || '')) errs.push('Valid email required.');
       if (!x.agreed) errs.push('Terms must be accepted.');
       if (errs.length) return json(res, 400, { error: errs.join(' ') });
+      const online = x.pay === 'online';
+      if (online && !RZP()) return json(res, 400, { error: 'Online payment is not available right now. Please choose pay at venue.' });
       let b;
       db.exec('BEGIN IMMEDIATE'); // atomic: no two guests can take the same capacity
       try {
         const t = allocate(x.date, x.start, x.type, n, q);
         if (t < 0) { db.exec('ROLLBACK'); return json(res, 409, { error: 'Sorry, that capacity was just taken. Please pick another slot.' }); }
-        b = { id: refId(), name: String(x.name).trim(), phone: String(x.phone).replace(/\D/g, ''), email: x.email.trim(), date: x.date, start: x.start, players: n, type: x.type, tbl: t, sets: q, game_fee: n * CFG.fee, rental_fee: q * CFG.rent, total: n * CFG.fee + q * CFG.rent, pay_method: 'Pay at venue', pay_status: 'Pending', requests: String(x.requests || '').slice(0, 500) };
-        db.prepare(`INSERT INTO bookings(id,name,phone,email,date,start,players,type,tbl,sets,game_fee,rental_fee,total,pay_method,pay_status,requests) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-          .run(b.id, b.name, b.phone, b.email, b.date, b.start, b.players, b.type, b.tbl, b.sets, b.game_fee, b.rental_fee, b.total, b.pay_method, b.pay_status, b.requests);
+        b = { id: refId(), name: String(x.name).trim(), phone: String(x.phone).replace(/\D/g, ''), email: x.email.trim(), date: x.date, start: x.start, players: n, type: x.type, tbl: t, sets: q, game_fee: n * CFG.fee, rental_fee: q * CFG.rent, total: n * CFG.fee + q * CFG.rent, pay_method: online ? 'Online' : 'Pay at venue', pay_status: online ? 'Awaiting payment' : 'Pending', requests: String(x.requests || '').slice(0, 500) };
+        db.prepare(`INSERT INTO bookings(id,name,phone,email,date,start,players,type,tbl,sets,game_fee,rental_fee,total,pay_method,pay_status,requests,status,hold_until) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+          .run(b.id, b.name, b.phone, b.email, b.date, b.start, b.players, b.type, b.tbl, b.sets, b.game_fee, b.rental_fee, b.total, b.pay_method, b.pay_status, b.requests, online ? 'held' : 'confirmed', online ? Date.now() + HOLD * 60000 : null);
         db.exec('COMMIT');
       } catch (e) { db.exec('ROLLBACK'); throw e; }
+      if (online) {
+        try { const order = await createOrder(b); return json(res, 201, { booking: b, order, holdMinutes: HOLD }); }
+        catch (e) { db.prepare(`UPDATE bookings SET status='failed' WHERE id=?`).run(b.id); console.error(e); return json(res, 502, { error: 'Could not start the payment. Please try again or choose pay at venue.' }); }
+      }
       notifyBooked(b); // async, booking is already saved
       return json(res, 201, { booking: b });
     }
@@ -104,6 +167,7 @@ http.createServer(async (req, res) => {
       const x = await body(req);
       const b = db.prepare(`SELECT * FROM bookings WHERE id=? AND lower(email)=lower(?) AND status='confirmed'`).get(x.id || '', x.email || '');
       if (!b) return json(res, 404, { error: 'Booking not found.' });
+      if (b.pay_method === 'Online' && b.pay_status === 'Paid') return json(res, 403, { error: 'This booking was paid online. Please contact our booking team to cancel and arrange a refund: Alka Nagpal +91 99801 36969 or Vedashree +91 98452 71738.' });
       const bt = Date.parse(b.date + 'T' + pad(Math.floor(b.start / 60)) + ':' + pad(b.start % 60) + ':00Z');
       if (bt - istNow().t < 864e5) return json(res, 403, { error: 'Free cancellation closes 24 hours before your booking. Please contact our booking team: Alka Nagpal +91 99801 36969 or Vedashree +91 98452 71738.' });
       db.prepare(`UPDATE bookings SET status='cancelled',cancelled_at=? WHERE id=?`).run(new Date().toISOString(), b.id);
@@ -127,7 +191,7 @@ http.createServer(async (req, res) => {
         return res.end([cols.join(','), ...rows.map(r => cols.map(c => '"' + String(r[c] ?? '').replace(/"/g, '""') + '"').join(','))].join('\n'));
       }
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      return res.end(`<meta name=viewport content="width=device-width"><body style="font:14px sans-serif;padding:16px"><h2>Mahjong Madness bookings</h2><p><a href="/admin/export.csv">Export CSV</a> · ${rows.length} total</p><div style="overflow-x:auto"><table border=1 cellpadding=6 style="border-collapse:collapse"><tr><th>Ref<th>Date<th>Time<th>Guest<th>Mobile<th>Email<th>Players<th>Type<th>Table<th>Sets<th>Total<th>Payment<th>Status<th>Requests<th>Email status</tr>${rows.map(r => `<tr><td>${r.id}<td>${r.date}<td>${rng(r.start)}<td>${esc(r.name)}<td>${r.phone}<td>${esc(r.email)}<td>${r.players}<td>${typeLbl(r.type)}<td>${r.tbl + 1}<td>${r.sets}<td>₹${r.total}<td>${r.pay_method} (${r.pay_status})<td>${r.status}<td>${esc(r.requests)}<td>${r.email_status || ''}</tr>`).join('')}</table></div>`);
+      return res.end(`<meta name=viewport content="width=device-width"><body style="font:14px sans-serif;padding:16px"><h2>Mahjong Madness bookings</h2><p><a href="/admin/export.csv">Export CSV</a> · ${rows.length} total</p><div style="overflow-x:auto"><table border=1 cellpadding=6 style="border-collapse:collapse"><tr><th>Ref<th>Date<th>Time<th>Guest<th>Mobile<th>Email<th>Players<th>Type<th>Table<th>Sets<th>Total<th>Payment<th>Status<th>Requests<th>Email status</tr>${rows.map(r => `<tr><td>${r.id}<td>${r.date}<td>${rng(r.start)}<td>${esc(r.name)}<td>${r.phone}<td>${esc(r.email)}<td>${r.players}<td>${typeLbl(r.type)}<td>${r.tbl + 1}<td>${r.sets}<td>₹${r.total}<td>${r.pay_method} (${r.pay_status}) ${r.payment_id || ''}<td>${r.status}<td>${esc(r.requests)}<td>${r.email_status || ''}</tr>`).join('')}</table></div>`);
     }
 
     if (url.pathname === '/' || url.pathname === '/index.html') { const page = fs.readFileSync(new URL('./index.html', import.meta.url)); res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); return res.end(page); }
