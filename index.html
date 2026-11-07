@@ -190,7 +190,7 @@ listMine();loadOcc();
 // ---- PayU online payment: guest is sent to PayU, then returned; server verifies before confirming ----
 let PAY='venue',CFGP={enabled:false};
 const po=[...document.querySelectorAll('#bk .opts')].pop(),[bo,bv]=po.children;bo.dataset.pay='online';bv.dataset.pay='venue';
-API('/api/config').then(c=>{CFGP=c;if(c.enabled){bo.disabled=false;bo.innerHTML='<b>PAY ONLINE</b>Pay securely through the configured payment gateway.'+(c.test?' <b>(Test mode: no real money is charged.)</b>':'')}else bo.lastChild.textContent=' Not available yet: payment gateway not configured.'}).catch(()=>{});
+API('/api/config').then(c=>{CFGP=c;if(c.sets!=null){CFG.sets=c.sets;renderTimes()}if(c.enabled){bo.disabled=false;bo.innerHTML='<b>PAY ONLINE</b>Pay securely through the configured payment gateway.'+(c.test?' <b>(Test mode: no real money is charged.)</b>':'')}else bo.lastChild.textContent=' Not available yet: payment gateway not configured.'}).catch(()=>{});
 document.addEventListener('click',e=>{const b=e.target.closest('[data-pay]');if(!b||b.disabled)return;PAY=b.dataset.pay;po.querySelectorAll('[data-pay]').forEach(x=>x.setAttribute('aria-pressed',x===b));$('go').textContent=PAY==='online'?'PAY ONLINE & BOOK':'BOOK YOUR TABLE.'});
 function finish(b){const v={id:b.id,name:b.name,date:b.date,start:b.start,players:b.players,type:b.type,sets:b.sets,pay:b.pay_method,payStatus:b.pay_status,total:b.total,email:b.email};
  try{const m=JSON.parse(localStorage.getItem('mm_mine')||'[]');if(!m.some(x=>x.id===v.id))m.push(v);localStorage.setItem('mm_mine',JSON.stringify(m))}catch(e){}

@@ -20,6 +20,17 @@ const HOLD = +(E.HOLD_MINUTES || 10), PAYU = () => !!(E.PAYU_KEY && E.PAYU_SALT)
 const sha512 = t => crypto.createHash('sha512').update(t).digest('hex');
 const safeEq = (a, b) => { a = Buffer.from(String(a)); b = Buffer.from(String(b)); return a.length === b.length && crypto.timingSafeEqual(a, b); };
 const formBody = req => new Promise((ok, no) => { let d = ''; req.on('data', c => { d += c; if (d.length > 1e5) { req.destroy(); no(); } }); req.on('end', () => { try { ok((req.headers['content-type'] || '').includes('json') ? JSON.parse(d) : Object.fromEntries(new URLSearchParams(d))); } catch { ok({}); } }); });
+db.exec(`CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT)`);
+db.exec(`CREATE TABLE IF NOT EXISTS blocks(id INTEGER PRIMARY KEY AUTOINCREMENT, tbl INTEGER, date TEXT, start INTEGER, end INTEGER, reason TEXT)`);
+const getSet = (k, d) => { const r = db.prepare('SELECT v FROM settings WHERE k=?').get(k); return r ? +r.v : d; };
+const setsAvail = () => Math.max(0, getSet('sets_total', CFG.sets) - getSet('sets_damaged', 0));
+function blockOcc() { // table closures shown to the booking page as occupied tables
+  const out = [];
+  for (const k of db.prepare('SELECT * FROM blocks WHERE date>=?').all(istNow().d)) {
+    for (let x = k.start; x <= Math.max(k.start, k.end - CFG.dur); x += CFG.step) out.push({ id: 'blk' + k.id, date: k.date, start: x, players: CFG.cap, type: 'private', table: k.tbl, sets: 0, status: 'confirmed' });
+  }
+  return out;
+}
 const pad = n => String(n).padStart(2, '0');
 const fmt = m => { const h = Math.floor(m / 60), mm = m % 60; return (h % 12 || 12) + (mm ? ':' + pad(mm) : '') + ' ' + (h < 12 ? 'AM' : 'PM'); };
 const rng = s => fmt(s) + ' – ' + fmt(s + CFG.dur);
@@ -29,10 +40,12 @@ const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '
 function overlapping(date, s, ignore) {
   return db.prepare(`SELECT * FROM bookings WHERE (status='confirmed' OR (status='held' AND hold_until>?)) AND date=? AND id<>? AND ABS(start-?)<?`).all(Date.now(), date, ignore || '', s, CFG.dur);
 }
-function allocate(date, s, type, n, sets, ignore) {
+function allocate(date, s, type, n, sets, ignore, only) {
   const ex = overlapping(date, s, ignore);
-  if (CFG.sets - ex.reduce((a, b) => a + b.sets, 0) < sets) return -1;
+  if (setsAvail() - ex.reduce((a, b) => a + b.sets, 0) < sets) return -1;
+  const bl = db.prepare('SELECT tbl FROM blocks WHERE date=? AND start<? AND end>?').all(date, s + CFG.dur, s).map(r => r.tbl);
   for (let t = 0; t < CFG.tables; t++) {
+    if (bl.includes(t) || (only != null && t !== only)) continue;
     const on = ex.filter(b => b.tbl === t);
     if (type === 'private' ? !on.length : !on.some(b => b.type === 'private') && on.reduce((a, b) => a + b.players, 0) + n <= CFG.cap) return t;
   }
@@ -114,6 +127,56 @@ async function confirmPaid(id, paymentId) {
   notifyBooked(nb);
   return nb;
 }
+async function adminApi(req, res, url) {
+  const p = url.pathname.slice('/admin/api/'.length), j = (c, o) => json(res, c, o), now = istNow();
+  if (p === 'day') {
+    const d = url.searchParams.get('date') || now.d;
+    const b = db.prepare(`SELECT * FROM bookings WHERE date=? AND (status='confirmed' OR (status='held' AND hold_until>?)) ORDER BY start`).all(d, Date.now());
+    return j(200, { date: d, tables: CFG.tables, bookings: b, blocks: db.prepare('SELECT * FROM blocks WHERE date=? ORDER BY start').all(d), sets: { total: getSet('sets_total', CFG.sets), damaged: getSet('sets_damaged', 0), booked: b.reduce((a, x) => a + x.sets, 0) } });
+  }
+  if (p === 'bookings') {
+    const q = (url.searchParams.get('q') || '').toLowerCase(), f = url.searchParams.get('f') || 'all';
+    let r = db.prepare('SELECT * FROM bookings ORDER BY date DESC,start DESC').all();
+    r = r.filter(b => (f === 'cancelled' ? b.status === 'cancelled' : !['cancelled', 'failed'].includes(b.status)) && (f === 'today' ? b.date === now.d : f === 'upcoming' ? b.date >= now.d : f === 'past' ? b.date < now.d : f === 'online' ? b.pay_method === 'Online' : f === 'venue' ? b.pay_method !== 'Online' : true) && (!q || [b.name, b.id, b.phone].join(' ').toLowerCase().includes(q)));
+    return j(200, { bookings: r.slice(0, 300) });
+  }
+  if (p === 'blocks') return j(200, { blocks: db.prepare('SELECT * FROM blocks WHERE date>=? ORDER BY date,start').all(now.d) });
+  if (req.method !== 'POST') return j(404, { error: 'Not found' });
+  const x = await body(req), live = id => db.prepare(`SELECT * FROM bookings WHERE id=? AND status IN ('confirmed','held')`).get(id || '');
+  if (p === 'cancel') {
+    const b = live(x.id); if (!b) return j(404, { error: 'Booking not found.' });
+    db.prepare(`UPDATE bookings SET status='cancelled',cancelled_at=? WHERE id=?`).run(new Date().toISOString(), b.id);
+    notifyCancelled(b);
+    return j(200, { ok: true, note: b.pay_status === 'Paid' ? 'This was paid online. Refund it manually in your PayU dashboard.' : '' });
+  }
+  if (p === 'markpaid') { db.prepare(`UPDATE bookings SET pay_status='Paid' WHERE id=? AND status='confirmed'`).run(x.id || ''); return j(200, { ok: true }); }
+  if (p === 'move') {
+    const b = live(x.id), t = +x.tbl; if (!b) return j(404, { error: 'Booking not found.' });
+    if (!(t >= 0 && t < CFG.tables)) return j(400, { error: 'Invalid table.' });
+    db.exec('BEGIN IMMEDIATE');
+    if (allocate(b.date, b.start, b.type, b.players, b.sets, b.id, t) < 0) { db.exec('ROLLBACK'); return j(409, { error: 'That table is not free (or is blocked) at that time.' }); }
+    db.prepare('UPDATE bookings SET tbl=? WHERE id=?').run(t, b.id); db.exec('COMMIT');
+    return j(200, { ok: true });
+  }
+  if (p === 'block') {
+    const t = +x.tbl, st = +x.start, en = +x.end;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(x.date || '') || !(t >= -1 && t < CFG.tables) || !(st >= CFG.open && en <= CFG.close && en > st)) return j(400, { error: 'Invalid date, table or time.' });
+    let conflicts = 0;
+    for (const tt of t === -1 ? [0, 1, 2, 3] : [t]) {
+      db.prepare('INSERT INTO blocks(tbl,date,start,end,reason) VALUES(?,?,?,?,?)').run(tt, x.date, st, en, String(x.reason || '').slice(0, 100));
+      conflicts += db.prepare(`SELECT COUNT(*) c FROM bookings WHERE status='confirmed' AND date=? AND tbl=? AND start<? AND start+?>?`).get(x.date, tt, en, CFG.dur, st).c;
+    }
+    return j(200, { ok: true, conflicts });
+  }
+  if (p === 'unblock') { db.prepare('DELETE FROM blocks WHERE id=?').run(+x.id); return j(200, { ok: true }); }
+  if (p === 'settings') {
+    const up = (k, v) => db.prepare('INSERT INTO settings(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v').run(k, String(v));
+    const tot = Math.max(0, Math.min(200, +x.sets_total | 0)), dmg = Math.max(0, Math.min(tot, +x.sets_damaged | 0));
+    up('sets_total', tot); up('sets_damaged', dmg);
+    return j(200, { ok: true, available: tot - dmg });
+  }
+  return j(404, { error: 'Not found' });
+}
 function json(res, code, o) { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(o)); }
 const body = req => new Promise((ok, no) => { let d = ''; req.on('data', c => { d += c; if (d.length > 2e4) { req.destroy(); no(); } }); req.on('end', () => { try { ok(JSON.parse(d || '{}')); } catch { no(); } }); });
 function authed(req) {
@@ -125,9 +188,9 @@ http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
   try {
     if (url.pathname === '/api/occupancy') // anonymised: no guest data
-      return json(res, 200, db.prepare(`SELECT id,date,start,players,type,tbl AS "table",sets,status FROM bookings WHERE (status='confirmed' OR (status='held' AND hold_until>${Date.now()})) AND date>=?`).all(istNow().d));
+      return json(res, 200, [...blockOcc(), ...db.prepare(`SELECT id,date,start,players,type,tbl AS "table",sets,status FROM bookings WHERE (status='confirmed' OR (status='held' AND hold_until>${Date.now()})) AND date>=?`).all(istNow().d)]);
 
-    if (url.pathname === '/api/config') return json(res, 200, { enabled: PAYU(), test: E.PAYU_ENV === 'test' });
+    if (url.pathname === '/api/config') return json(res, 200, { enabled: PAYU(), test: E.PAYU_ENV === 'test', sets: setsAvail() });
 
     if (url.pathname === '/api/pay/start' && req.method === 'POST') { // retry payment for a held booking
       const x = await body(req);
@@ -199,6 +262,8 @@ http.createServer(async (req, res) => {
 
     if (url.pathname.startsWith('/admin')) {
       if (!authed(req)) { res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="Mahjong Madness admin"' }); return res.end('Login required (set ADMIN_PASS).'); }
+      if (url.pathname === '/admin' || url.pathname === '/admin/') { const pg = fs.readFileSync(new URL('./admin.html', import.meta.url)); res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); return res.end(pg); }
+      if (url.pathname.startsWith('/admin/api/')) return await adminApi(req, res, url);
       if (url.pathname === '/admin/test-email') {
         const to = url.searchParams.get('to') || STAFF_EMAIL;
         res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });

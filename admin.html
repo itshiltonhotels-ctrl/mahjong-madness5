@@ -1,0 +1,62 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Mahjong Madness Admin</title>
+<style>
+:root{--navy:#101F46;--yel:#F5D442;--ivory:#F7F3E9;--char:#22252D}
+*{box-sizing:border-box}body{margin:0;font:15px/1.5 system-ui,sans-serif;background:var(--ivory);color:var(--char)}
+header{background:var(--navy);color:var(--yel);padding:14px 4vw;display:flex;flex-wrap:wrap;gap:12px;align-items:center}header b{font-size:1.2rem;margin-right:auto}
+nav button{background:none;border:2px solid var(--yel);color:var(--yel);border-radius:8px;padding:7px 14px;margin-left:6px;cursor:pointer;font-weight:700}nav button.on{background:var(--yel);color:var(--navy)}
+main{padding:20px 4vw;max-width:1100px;margin:auto}section{display:none}section.on{display:block}
+.card{background:#fff;border:2px solid var(--navy);border-radius:14px;padding:14px;margin-bottom:14px}
+.bar{position:relative;height:22px;background:#e5e5e5;border-radius:6px;margin:8px 0 12px;overflow:hidden}.seg{position:absolute;top:0;height:100%;background:var(--navy);opacity:.75;border-right:1px solid #fff}.seg.p{background:#b5651d}.seg.b{background:#c0392b}
+.row{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;padding:8px 0;border-top:1px solid #0002;font-size:.9rem}.row .g{flex:1 1 320px}
+button.s{background:var(--navy);color:#fff;border:0;border-radius:6px;padding:5px 10px;cursor:pointer}button.d{background:#c0392b}
+input,select{padding:8px;border:2px solid var(--navy);border-radius:8px;font:inherit;background:#fff}
+.tag{display:inline-block;background:var(--yel);color:var(--navy);border-radius:99px;padding:1px 9px;font-size:.75rem;font-weight:700}.muted{opacity:.7;font-size:.85rem}.ok{color:#1f6b35}.er{color:#a12}
+.f{display:flex;flex-wrap:wrap;gap:8px;align-items:end;margin:8px 0}.f label{display:block;font-size:.75rem;font-weight:700}
+</style></head><body>
+<header><b>Mahjong Madness · Admin</b><nav><button data-t="tb" class="on">Tables</button><button data-t="bk">Bookings</button><button data-t="inv">Inventory</button></nav></header>
+<main>
+<p id="msg" class="muted" role="status"></p>
+
+<section id="tb" class="on"><div class="f"><div><label for="dt">Date</label><input type="date" id="dt"></div><button class="s" id="prev">&larr; Prev</button><button class="s" id="next">Next &rarr;</button><button class="s" id="today">Today</button></div>
+<p class="muted" id="sum"></p><div id="tabs"></div>
+<p class="muted"><span class="tag">Navy</span> individual seats &nbsp; <span class="tag" style="background:#b5651d;color:#fff">Brown</span> private table &nbsp; <span class="tag" style="background:#c0392b;color:#fff">Red</span> table blocked. Bar runs 12 PM to 6 PM.</p></section>
+
+<section id="bk"><div class="f"><div><label for="q">Search name, reference or mobile</label><input id="q"></div><div><label for="fl">Show</label><select id="fl"><option value="all">All</option><option value="today">Today</option><option value="upcoming">Upcoming</option><option value="past">Past</option><option value="cancelled">Cancelled</option><option value="online">Paid online</option><option value="venue">Pay at venue</option></select></div><a href="/admin/export.csv"><button class="s" type="button">Export CSV</button></a></div><div id="bl"></div></section>
+
+<section id="inv"><div class="card"><h3 style="margin-top:0">Rental sets</h3><p class="muted">Sets you own, and how many are damaged or unavailable. Guests can only rent the difference.</p>
+<div class="f"><div><label for="st">Total sets</label><input type="number" id="st" min="0" style="width:100px"></div><div><label for="sd">Damaged / unavailable</label><input type="number" id="sd" min="0" style="width:100px"></div><button class="s" id="ss">Save</button><span id="sa" class="tag"></span></div></div>
+<div class="card"><h3 style="margin-top:0">Block a table (temporary closure)</h3><p class="muted">Blocked tables cannot be booked. Existing bookings are not cancelled, so check the Tables tab.</p>
+<div class="f"><div><label for="bt">Table</label><select id="bt"><option value="-1">All tables</option><option value="0">Table 1</option><option value="1">Table 2</option><option value="2">Table 3</option><option value="3">Table 4</option></select></div><div><label for="bd">Date</label><input type="date" id="bd"></div><div><label for="b1">From</label><select id="b1"></select></div><div><label for="b2">To</label><select id="b2"></select></div><div><label for="br">Reason</label><input id="br" placeholder="e.g. Cleaning"></div><button class="s" id="ba">Block</button></div>
+<div id="bls"></div></div></section>
+</main>
+<script>
+const $=s=>document.querySelector(s),api=async(u,o)=>{const r=await fetch(u,o);const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('Error '+r.status));return j},post=(u,b)=>api(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
+const pad=n=>String(n).padStart(2,'0'),f=m=>{const h=Math.floor(m/60);return(h%12||12)+(m%60?':'+pad(m%60):'')+' '+(h<12?'AM':'PM')},rng=(a,b)=>f(a)+' – '+f(b),esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const say=(t,bad)=>{$('#msg').textContent=t;$('#msg').className=bad?'er':'ok'};const run=async fn=>{try{await fn()}catch(e){say(e.message,1)}};
+const today=new Date().toLocaleDateString('sv-SE',{timeZone:'Asia/Kolkata'});
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{document.querySelectorAll('nav button,section').forEach(x=>x.classList.remove('on'));b.classList.add('on');$('#'+b.dataset.t).classList.add('on');if(b.dataset.t==='bk')loadB();if(b.dataset.t==='inv')loadI();else if(b.dataset.t==='tb')loadD()});
+// ---- tables board ----
+$('#dt').value=today;$('#bd').value=today;
+const shift=n=>{const d=new Date($('#dt').value+'T00:00:00Z');d.setUTCDate(d.getUTCDate()+n);$('#dt').value=d.toISOString().slice(0,10);loadD()};
+$('#prev').onclick=()=>shift(-1);$('#next').onclick=()=>shift(1);$('#today').onclick=()=>{$('#dt').value=today;loadD()};$('#dt').onchange=loadD;
+function loadD(){run(async()=>{const d=await api('/admin/api/day?date='+$('#dt').value);const pos=(a,b)=>`left:${(a-720)/3.6}%;width:${(b-a)/3.6}%`;let h='';
+ $('#sum').textContent=`${d.bookings.length} booking(s) · ${d.bookings.reduce((a,b)=>a+b.players,0)} player(s) · rental sets booked: ${d.sets.booked} of ${d.sets.total-d.sets.damaged} available`;
+ for(let t=0;t<d.tables;t++){const bs=d.bookings.filter(b=>b.tbl===t),bl=d.blocks.filter(b=>b.tbl===t);
+  h+=`<div class="card"><b>Table ${t+1}</b> <span class="muted">(4 seats)</span><div class="bar">${bs.map(b=>`<div class="seg ${b.type==='private'?'p':''}" style="${pos(b.start,b.start+120)}" title="${esc(b.name)}"></div>`).join('')}${bl.map(b=>`<div class="seg b" style="${pos(b.start,b.end)}"></div>`).join('')}</div>`;
+  h+=bl.map(b=>`<div class="row"><span class="g"><span class="tag" style="background:#c0392b;color:#fff">BLOCKED</span> ${rng(b.start,b.end)} ${esc(b.reason)}</span><button class="s d" onclick="unblock(${b.id})">Remove block</button></div>`).join('');
+  h+=bs.map(b=>`<div class="row"><span class="g"><b>${rng(b.start,b.start+120)}</b> · ${b.type==='private'?'Private table':'Individual seats'} · ${esc(b.name)} (${b.players}) · ${b.sets} set(s)<br><span class="muted">${esc(b.phone)} · ${b.id} · ${b.pay_method}: ${b.pay_status}${b.status==='held'?' · <b>awaiting payment</b>':''}</span></span><button class="s" onclick="mv('${b.id}')">Move table</button><button class="s d" onclick="cx('${b.id}')">Cancel</button></div>`).join('');
+  if(!bs.length&&!bl.length)h+='<div class="muted">No bookings.</div>';h+='</div>'}$('#tabs').innerHTML=h})}
+function mv(id){const t=prompt('Move to which table? (1-4)');if(t)run(async()=>{await post('/admin/api/move',{id,tbl:+t-1});say('Moved.');loadD()})}
+function cx(id){if(confirm('Cancel this booking? The table and sets are released and the guest is emailed.'))run(async()=>{const r=await post('/admin/api/cancel',{id});say('Cancelled. '+(r.note||''));loadD();if($('#bk').classList.contains('on'))loadB()})}
+// ---- bookings ----
+function loadB(){run(async()=>{const r=await api('/admin/api/bookings?f='+$('#fl').value+'&q='+encodeURIComponent($('#q').value));$('#bl').innerHTML=r.bookings.length?r.bookings.map(b=>`<div class="card"><b>${b.id}</b> · ${b.date} ${rng(b.start,b.start+120)} · Table ${b.tbl+1} · ${b.type==='private'?'Private':'Seats'}<br>${esc(b.name)} · ${b.players} player(s) · ${b.sets} set(s) · ₹${b.total}<br><span class="muted">${esc(b.phone)} · ${esc(b.email)} · ${b.pay_method}: ${b.pay_status} · ${b.status}${b.requests?' · "'+esc(b.requests)+'"':''}</span><br>${b.status!=='cancelled'?`${b.pay_status!=='Paid'&&b.status==='confirmed'?`<button class="s" onclick="paid('${b.id}')">Mark paid</button> `:''}<button class="s d" onclick="cx('${b.id}')">Cancel</button>`:''}</div>`).join(''):'<p class="muted">No bookings found.</p>'})}
+$('#q').oninput=loadB;$('#fl').onchange=loadB;function paid(id){run(async()=>{await post('/admin/api/markpaid',{id});say('Marked as paid.');loadB()})}
+// ---- inventory ----
+for(let m=720;m<=1080;m+=30){for(const s of['#b1','#b2'])$(s).add(new Option(f(m),m))}$('#b1').value=720;$('#b2').value=1080;
+function loadI(){run(async()=>{const d=await api('/admin/api/day?date='+today);$('#st').value=d.sets.total;$('#sd').value=d.sets.damaged;$('#sa').textContent='Available to rent: '+(d.sets.total-d.sets.damaged);
+ const r=await api('/admin/api/blocks');$('#bls').innerHTML=r.blocks.length?r.blocks.map(b=>`<div class="row"><span class="g">Table ${b.tbl+1} · ${b.date} · ${rng(b.start,b.end)} ${esc(b.reason)}</span><button class="s d" onclick="unblock(${b.id})">Remove</button></div>`).join(''):'<p class="muted">No blocks.</p>'})}
+$('#ss').onclick=()=>run(async()=>{const r=await post('/admin/api/settings',{sets_total:+$('#st').value,sets_damaged:+$('#sd').value});say('Saved. Available to rent: '+r.available);loadI()});
+$('#ba').onclick=()=>run(async()=>{const r=await post('/admin/api/block',{tbl:+$('#bt').value,date:$('#bd').value,start:+$('#b1').value,end:+$('#b2').value,reason:$('#br').value});say('Blocked.'+(r.conflicts?' Warning: '+r.conflicts+' existing booking(s) overlap this block. Check the Tables tab.':''));loadI()});
+function unblock(id){run(async()=>{await post('/admin/api/unblock',{id});say('Block removed.');loadI();loadD()})}
+loadD();
+</script></body></html>
