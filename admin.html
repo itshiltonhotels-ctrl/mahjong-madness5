@@ -22,7 +22,7 @@ a{color:var(--navy)}.dt{width:100%;border-collapse:collapse}.dt td,.dt th{border
 
 <section id="tb" class="on"><div class="f"><div><label for="dt">Date</label><input type="date" id="dt"></div><button class="s" id="prev">&larr; Prev</button><button class="s" id="next">Next &rarr;</button><button class="s" id="today">Today</button></div>
 <p class="muted" id="sum"></p><div id="tabs"></div>
-<p class="muted"><span class="tag">Navy</span> individual seats &nbsp; <span class="tag" style="background:#b5651d;color:#fff">Brown</span> private table &nbsp; <span class="tag" style="background:#c0392b;color:#fff">Red</span> blocked. Bar runs 12 PM to 6 PM.</p></section>
+<p class="muted"><span class="tag">Navy</span> individual seats &nbsp; <span class="tag" style="background:#b5651d;color:#fff">Brown</span> private table &nbsp; <span class="tag" style="background:#c0392b;color:#fff">Red</span> blocked. Bar runs 12 PM to 8 PM.</p></section>
 
 <section id="inv"><div class="card"><h3>Inventory by table and time slot</h3><p class="muted">Each row is a 2-hour slot starting at that time. Click any cell to see who is booked, move or cancel bookings, or block / unblock that table for that slot.</p>
 <div class="f"><div><label for="idt">Date</label><input type="date" id="idt"></div><button class="s" id="iprev">&larr; Prev</button><button class="s" id="inext">Next &rarr;</button><button class="s" id="itoday">Today</button></div>
@@ -67,7 +67,7 @@ function show(t){document.querySelectorAll('nav button,section').forEach(x=>x.cl
 // ---------- Tables tab (per-table timeline + guests) ----------
 $('#dt').value=today;const sh=n=>{$('#dt').value=addD($('#dt').value,n);loadD()};$('#prev').onclick=()=>sh(-1);$('#next').onclick=()=>sh(1);$('#today').onclick=()=>{$('#dt').value=today;loadD()};$('#dt').onchange=loadD;
 const bRow=b=>`<div class="row"><span class="g"><b>${rng(b.start,b.start+120)}</b> · ${b.type==='private'?'Whole table':'Individual seats'} · ${esc(b.name)} (${b.players} people) · ${b.sets} set(s)<br><span class="muted"><a href="tel:+91${String(b.phone).slice(-10)}">${esc(b.phone)}</a> · ${esc(b.email)||'no email'} · ${b.id} · ${b.pay_method}: ${b.pay_status}${b.status==='held'?' · <b>awaiting payment</b>':''}</span></span><button class="s" onclick="detail('${b.id}')">Details</button><button class="s" onclick="mv('${b.id}')">Move table</button><button class="s d" onclick="cx('${b.id}')">Cancel</button></div>`;
-function loadD(){run(async()=>{const d=await api('/admin/api/day?date='+$('#dt').value),pos=(a,b)=>`left:${(a-720)/3.6}%;width:${(b-a)/3.6}%`;let h='';
+function loadD(){run(async()=>{const d=await api('/admin/api/day?date='+$('#dt').value),pos=(a,b)=>`left:${(a-720)/4.8}%;width:${(b-a)/4.8}%`;let h='';
  $('#sum').textContent=`${d.bookings.length} booking(s) · ${d.bookings.reduce((a,b)=>a+b.players,0)} player(s) · rental sets booked: ${d.sets.booked} of ${d.sets.total-d.sets.damaged} available`;
  for(let t=0;t<d.tables;t++){const bs=d.bookings.filter(b=>b.tbl===t),bl=d.blocks.filter(b=>b.tbl===t);
   h+=`<div class="card"><b>Table ${t+1}</b> <span class="muted">(4 seats)</span><div class="bar">${bs.map(b=>`<div class="seg ${b.type==='private'?'p':''}" style="${pos(b.start,b.start+120)}" title="${esc(b.name)}"></div>`).join('')}${bl.map(b=>`<div class="seg b" style="${pos(b.start,b.end)}"></div>`).join('')}</div>`+
@@ -82,7 +82,7 @@ const ish=n=>{$('#idt').value=addD($('#idt').value,n);SEL=null;loadI()};$('#ipre
 function cellInfo(t,s){const e=s+120,bl=DAY.blocks.filter(b=>b.tbl===t&&b.start<e&&b.end>s),bs=DAY.bookings.filter(b=>b.tbl===t&&b.start<e&&b.start+120>s),used=bs.reduce((a,b)=>a+(b.type==='private'?4:b.players),0);return{bl,bs,used}}
 function loadI(){run(async()=>{const d=DAY=await api('/admin/api/day?date='+$('#idt').value);$('#st').value=d.sets.total;$('#sd').value=d.sets.damaged;$('#sa').textContent='Available to rent: '+(d.sets.total-d.sets.damaged);
  let h='<tr><th>Slot start</th>'+[1,2,3,4].map(n=>`<th>Table ${n}</th>`).join('')+'<th>Rental sets free</th></tr>';
- for(let s=720;s+120<=1080;s+=30){h+=`<tr><td class="tm">${f(s)} – ${f(s+120)}</td>`;
+ for(let s=720;s+120<=1200;s+=30){h+=`<tr><td class="tm">${f(s)} – ${f(s+120)}</td>`;
   for(let t=0;t<4;t++){const c=cellInfo(t,s),sel=SEL&&SEL.t===t&&SEL.s===s;let cl,tx;
    if(c.bl.length){cl='blk';tx='BLOCKED'+(c.bl[0].reason?'<br>'+esc(c.bl[0].reason):'')}else if(c.bs.some(b=>b.type==='private')){cl='full';tx='BOOKED<br>'+esc(c.bs.find(b=>b.type==='private').name)}else if(c.used>=4){cl='full';tx='FULL 4/4<br>'+c.bs.map(b=>esc(b.name)).join(', ')}else if(c.used>0){cl='part';tx=`${c.used}/4 seats<br>${c.bs.map(b=>esc(b.name)).join(', ')}`}else{cl='free';tx='Free<br>4 seats'}
    h+=`<td class="${cl}${sel?' sel':''}" onclick="pick(${t},${s})">${tx}</td>`}
@@ -92,11 +92,11 @@ function loadI(){run(async()=>{const d=DAY=await api('/admin/api/day?date='+$('#
 function pick(t,s){SEL={t,s};loadI()}
 function cellPanel(){const p=$('#cellp');if(!SEL){p.innerHTML='';return}const{t,s}=SEL,c=cellInfo(t,s);
  p.innerHTML=`<div class="card" style="margin-top:12px"><h3>Table ${t+1} · ${rng(s,s+120)} · ${$('#idt').value}</h3>`+(c.bl.map(b=>`<div class="row"><span class="g"><span class="tag" style="background:#c0392b;color:#fff">BLOCKED</span> ${rng(b.start,b.end)} ${esc(b.reason)}</span><button class="s d" onclick="unblock(${b.id})">Remove block (${rng(b.start,b.end)})</button></div>`).join(''))+(c.bs.length?c.bs.map(bRow).join(''):'<p class="muted">No bookings in this slot.</p>')+
- `<div class="f"><button class="s d" onclick="blk(${t},${s},${s+120})">Block this table for this slot</button><button class="s d" onclick="blk(${t},720,1080)">Block this table for the whole day</button></div></div>`}
+ `<div class="f"><button class="s d" onclick="blk(${t},${s},${s+120})">Block this table for this slot</button><button class="s d" onclick="blk(${t},720,1200)">Block this table for the whole day</button></div></div>`}
 function blk(t,a,b){const reason=prompt('Reason (optional)','')??null;if(reason===null)return;run(async()=>{const r=await post('/admin/api/block',{tbl:t,date:$('#idt').value,start:a,end:b,reason});say('Blocked.'+(r.conflicts?' Warning: '+r.conflicts+' existing booking(s) overlap. Move or cancel them.':''));loadI()})}
 function unblock(id){run(async()=>{await post('/admin/api/unblock',{id});say('Block removed.');refresh()})}
 $('#ss').onclick=()=>run(async()=>{const r=await post('/admin/api/settings',{sets_total:+$('#st').value,sets_damaged:+$('#sd').value});say('Saved. Available to rent: '+r.available);loadI()});
-for(let m=720;m<=1080;m+=30)for(const s of['#b1','#b2'])$(s).add(new Option(f(m),m));$('#b1').value=720;$('#b2').value=1080;
+for(let m=720;m<=1200;m+=30)for(const s of['#b1','#b2'])$(s).add(new Option(f(m),m));$('#b1').value=720;$('#b2').value=1200;
 $('#ba').onclick=()=>run(async()=>{const r=await post('/admin/api/block',{tbl:+$('#bt').value,date:$('#bd').value,start:+$('#b1').value,end:+$('#b2').value,reason:$('#br').value});say('Blocked.'+(r.conflicts?' Warning: '+r.conflicts+' existing booking(s) overlap. Check the Tables tab.':''));loadI()});
 // ---------- Bookings tab (search + filters + totals) ----------
 let LAST=[];

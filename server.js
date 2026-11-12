@@ -6,7 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 const E = process.env;
 const PORT = E.PORT || 3000;
-const CFG = { tables: 4, cap: 4, fee: 1000, rent: 500, sets: +(E.RENTAL_SETS || 8), open: 720, close: 1080, dur: 120, step: 30 };
+const CFG = { tables: 4, cap: 4, fee: 1000, rent: 500, sets: +(E.RENTAL_SETS || 8), open: 720, close: 1200, dur: 120, step: 30 };
 const STAFF_EMAIL = E.STAFF_EMAIL || 'murali.dg@shiltonhospitality.com';
 const db = new DatabaseSync(E.DB_PATH || 'bookings.db');
 db.exec(`CREATE TABLE IF NOT EXISTS bookings(
