@@ -167,7 +167,7 @@ refresh();listMine();
 // ---- Server-connected overrides: bookings are saved in the database and emailed ----
 const API=async(u,o)=>{const r=await fetch(u,o);const t=await r.text();let j={};try{j=JSON.parse(t)}catch(e){}if(!r.ok)throw new Error(j.error||('Server replied '+r.status+' at '+u+(t?': '+t.slice(0,120).replace(/<[^>]*>/g,' '):'')));return j};
 async function loadOcc(){try{DB=(await API('/api/occupancy')).map(b=>({...b,status:'confirmed'}));}catch(e){}refresh()}
-const _sd=window.showDone;window.showDone=b=>{_sd(b);const p=$('done').querySelector('p.sub');if(p)p.textContent='A confirmation email has been sent to '+b.email+'. Please keep your booking reference.'};
+const _sd=window.showDone;window.showDone=b=>{_sd(b);const p=$('done').querySelector('p.sub');if(p)p.textContent='We are emailing your confirmation to '+b.email+'. Please keep your booking reference.'};
 $('go').onclick=async()=>{const x=total(),nm=$('nm').value.trim(),ph=$('ph').value.replace(/\D/g,''),em=$('em').value.trim();
  if(!S.date||S.start==null)return err('Please choose a date and time.');
  if(nm.length<2)return err('Please enter your full name.');
@@ -189,9 +189,10 @@ listMine();loadOcc();
 // ---- PayU online payment: guest is sent to PayU, then returned; server verifies before confirming ----
 let PAY='online',CFGP={enabled:false};
 const po=[...document.querySelectorAll('#bk .opts')].pop(),bo=po.children[0];bo.dataset.pay='online';$('go').textContent='PAY ONLINE & BOOK';
-API('/api/config').then(c=>{CFGP=c;if(c.sets!=null){CFG.sets=c.sets;renderTimes()}if(c.enabled){bo.disabled=false;bo.innerHTML='<b>PAY ONLINE</b>Pay securely through the configured payment gateway.'+(c.test?' <b>(Test mode: no real money is charged.)</b>':'')}else{bo.lastChild.textContent=' Online booking is temporarily unavailable. Please contact our booking team.';$('go').disabled=true}}).catch(()=>{});
+API('/api/config').then(c=>{CFGP=c;if(c.sets!=null){CFG.sets=c.sets;renderTimes()}if(c.free){const t=document.createElement('div');t.style.cssText='background:#c0392b;color:#fff;text-align:center;padding:8px;font-weight:700';t.textContent='TEST MODE: no payment is taken and bookings are marked TEST.';document.body.prepend(t)}
+if(c.enabled){bo.disabled=false;bo.innerHTML='<b>PAY ONLINE</b>Pay securely through the configured payment gateway.'+(c.test?' <b>(Test mode: no real money is charged.)</b>':'');if(c.free){bo.innerHTML='<b>PAYMENT (TEST MODE)</b>No payment is taken in test mode. Your booking is confirmed straight away.';$('go').textContent='BOOK (TEST: NO PAYMENT)'}}else{bo.lastChild.textContent=' Online booking is temporarily unavailable. Please contact our booking team.';$('go').disabled=true}}).catch(()=>{});
 document.addEventListener('click',e=>{const b=e.target.closest('[data-pay]');if(!b||b.disabled)return;PAY=b.dataset.pay;po.querySelectorAll('[data-pay]').forEach(x=>x.setAttribute('aria-pressed',x===b));});
-function finish(b){const v={id:b.id,name:b.name,date:b.date,start:b.start,players:b.players,type:b.type,sets:b.sets,pay:b.pay_method,payStatus:b.pay_status,total:b.total,email:b.email};
+function finish(b){const v={id:b.id,name:b.name,date:b.date,start:b.start,players:b.players,type:b.type,sets:b.sets,pay:b.pay_method,payStatus:b.pay_status+(b.is_test?' (TEST: no money taken)':''),total:b.total,email:b.email};
  try{const m=JSON.parse(localStorage.getItem('mm_mine')||'[]');if(!m.some(x=>x.id===v.id))m.push(v);localStorage.setItem('mm_mine',JSON.stringify(m))}catch(e){}
  $('msg').className='msg';if($('rb'))$('rb').hidden=true;showDone(v);listMine()}
 function goPayU(p){const f=document.createElement('form');f.method='POST';f.action=p.action;for(const k in p.fields){const i=document.createElement('input');i.type='hidden';i.name=k;i.value=p.fields[k];f.appendChild(i)}document.body.appendChild(f);f.submit()}

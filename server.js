@@ -15,8 +15,8 @@ db.exec(`CREATE TABLE IF NOT EXISTS bookings(
  games INTEGER DEFAULT 1, pay_method TEXT DEFAULT 'Pay at venue', pay_status TEXT DEFAULT 'Pending',
  status TEXT DEFAULT 'confirmed', requests TEXT, cancelled_at TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, email_status TEXT)`);
 
-for (const c of ['hold_until INTEGER', 'order_id TEXT', 'payment_id TEXT', 'refund_status TEXT', 'refund_ref TEXT', 'refund_note TEXT', 'paid_at TEXT']) { try { db.exec('ALTER TABLE bookings ADD COLUMN ' + c); } catch {} }
-const HOLD = +(E.HOLD_MINUTES || 10), PAYU = () => !!(E.PAYU_KEY && E.PAYU_SALT);
+for (const c of ['hold_until INTEGER', 'order_id TEXT', 'payment_id TEXT', 'refund_status TEXT', 'refund_ref TEXT', 'refund_note TEXT', 'paid_at TEXT', 'is_test INTEGER DEFAULT 0']) { try { db.exec('ALTER TABLE bookings ADD COLUMN ' + c); } catch {} }
+const HOLD = +(E.HOLD_MINUTES || 10), PAYU = () => !!(E.PAYU_KEY && E.PAYU_SALT), TESTPAY = () => E.TEST_MODE === 'on'; // TEST_MODE=on: bookings confirm with NO payment (testing only)
 const sha512 = t => crypto.createHash('sha512').update(t).digest('hex');
 const safeEq = (a, b) => { a = Buffer.from(String(a)); b = Buffer.from(String(b)); return a.length === b.length && crypto.timingSafeEqual(a, b); };
 const formBody = req => new Promise((ok, no) => { let d = ''; req.on('data', c => { d += c; if (d.length > 1e5) { req.destroy(); no(); } }); req.on('end', () => { try { ok((req.headers['content-type'] || '').includes('json') ? JSON.parse(d) : Object.fromEntries(new URLSearchParams(d))); } catch { ok({}); } }); });
@@ -69,9 +69,9 @@ function details(b) {
   return `Booking ID: ${b.id}<br>Date: ${b.date}<br>Time: ${rng(b.start)}<br>People: ${b.players}<br>Game: Three rounds<br>Booking: One whole table<br>Table Fee: ₹${b.game_fee}<br>Mahjong Sets Rented: ${b.sets}<br>Set Rental: ₹${b.rental_fee}<br>Total Amount: ₹${b.total}<br>Payment: ${b.pay_method} (${b.pay_status})`;
 }
 async function notifyBooked(b) {
-  const guest = !b.email ? 'no_email' : await sendMail(b.email, 'Your Mahjong Madness booking is confirmed!',
+  const guest = !b.email ? 'no_email' : await sendMail(b.email, (b.is_test ? '[TEST] ' : '') + 'Your Mahjong Madness booking is confirmed!',
     `<p>Hey ${esc(b.name)},</p><p>You're booked!<br>Your Mahjong Madness game at Watson's Vasanth Nagar is confirmed.</p><p>Here are your booking details:<br>${details(b)}</p><p>Venue:<br>${VENUE}</p><p>Get your crew together and get ready for some Mahjong madness!<br>See you at the table.</p><p>Exclusively curated by Watson's Cantina.</p>`);
-  const staff = await sendMail(STAFF_EMAIL, `NEW BOOKING ${b.id}: ${b.date} ${rng(b.start)} (${b.players} players)`,
+  const staff = await sendMail(STAFF_EMAIL, `${b.is_test ? '[TEST] ' : ''}NEW BOOKING ${b.id}: ${b.date} ${rng(b.start)} (${b.players} players)`,
     `<p><b>New Mahjong Madness booking</b></p><p>${details(b)}</p><p>Guest: ${esc(b.name)}<br>Mobile: ${esc(b.phone)}<br>Email: ${esc(b.email)}<br>Assigned table: ${b.tbl + 1}<br>Special requests: ${esc(b.requests) || 'None'}</p>`);
   db.prepare('UPDATE bookings SET email_status=? WHERE id=?').run(`guest:${guest}; staff:${staff}`, b.id);
 }
@@ -131,12 +131,12 @@ async function confirmPaid(id, paymentId) {
   notifyBooked(nb);
   return nb;
 }
-const ADMIN_ONLY = new Set(['users', 'audit', 'report', 'settings', 'refund', 'markrefunded', 'markpaid', 'user/create', 'user/update', 'user/password']);
+const ADMIN_ONLY = new Set(['users', 'audit', 'report', 'settings', 'refund', 'markrefunded', 'markpaid', 'user/create', 'user/update', 'user/password', 'delete-tests']);
 async function adminApi(req, res, url, sess) {
   const p = url.pathname.slice('/admin/api/'.length), j = (c, o) => json(res, c, o), now = istNow();
   if (ADMIN_ONLY.has(p) && sess.role !== 'admin') return j(403, { error: 'Admin access required.' });
   const g = k => url.searchParams.get(k) || '';
-  if (p === 'me') return j(200, { user: sess.user, role: sess.role, owner: sess.user === OWNER() });
+  if (p === 'me') return j(200, { user: sess.user, role: sess.role, owner: sess.user === OWNER(), test_mode: TESTPAY() });
   if (p === 'users') return j(200, { owner: OWNER(), users: db.prepare('SELECT id,username,name,role,active,created_at,last_login FROM users ORDER BY username').all() });
   if (p === 'audit') {
     const from = g('from'), to = g('to'), usr = g('user'), act = g('action'), q = g('q').toLowerCase();
@@ -158,7 +158,7 @@ async function adminApi(req, res, url, sess) {
   if (p === 'report') {
     const from = g('from'), to = g('to'), grp = g('group') === 'month' ? 'month' : 'day', basis = g('basis') === 'paid' ? 'paid' : 'play';
     const dateOf = b => basis === 'paid' ? toIstDate(b.paid_at || b.created_at) : b.date;
-    const sel = db.prepare(`SELECT * FROM bookings WHERE status IN ('confirmed','cancelled')`).all().filter(b => { const d = dateOf(b); return (!from || d >= from) && (!to || d <= to); });
+    const sel = db.prepare(`SELECT * FROM bookings WHERE status IN ('confirmed','cancelled')`).all().filter(b => { const d = dateOf(b); return !b.is_test && (!from || d >= from) && (!to || d <= to); });
     const blank = k => ({ period: k, bookings: 0, people: 0, table_fees: 0, rental_fees: 0, gross: 0, collected: 0, refunded: 0, refund_pending: 0, cancelled: 0, net: 0 }), groups = new Map();
     for (const b of sel) {
       const d = dateOf(b), k = grp === 'month' ? d.slice(0, 7) : d; let a = groups.get(k); if (!a) groups.set(k, a = blank(k));
@@ -256,6 +256,7 @@ async function adminApi(req, res, url, sess) {
     notifyBooked(b);
     return j(201, { ok: true, booking: b });
   }
+  if (p === 'delete-tests') { const n = db.prepare('DELETE FROM bookings WHERE is_test=1').run().changes; audit(req, sess.user, 'delete_test_bookings', n + ' removed'); return j(200, { ok: true, deleted: n }); }
   if (p === 'export-log') { audit(req, sess.user, 'export', String(x.what || '').slice(0, 100)); return j(200, { ok: true }); }
   if (p === 'me/password') {
     if (sess.user === OWNER()) return j(400, { error: 'The owner password is set in Render (ADMIN_PASS). Change it there.' });
@@ -333,7 +334,7 @@ function limited(req) {
 const TOO_MANY = { error: 'Too many attempts. Please try again in 15 minutes, or contact our booking team: Alka Nagpal +91 99801 36969 or Vedashree +91 98452 71738.' };
 // Cancels a booking row; if it was paid online, flag a refund as due (staff trigger the actual refund).
 function cancelRow(b) {
-  const refund = b.pay_method === 'Online' && b.pay_status === 'Paid';
+  const refund = b.pay_method === 'Online' && b.pay_status === 'Paid' && !b.is_test;
   db.prepare(`UPDATE bookings SET status='cancelled',cancelled_at=?,refund_status=? WHERE id=?`).run(new Date().toISOString(), refund ? 'Refund due' : null, b.id);
   if (refund) sendMail(STAFF_EMAIL, 'REFUND DUE: ' + b.id, '<p>Booking ' + b.id + ' (' + esc(b.name) + ', ' + esc(b.phone) + ') was cancelled and paid online: ₹' + b.total + '. Open the admin dashboard to refund it via PayU.</p>');
   return refund;
@@ -357,7 +358,7 @@ http.createServer(async (req, res) => {
     if (url.pathname === '/api/occupancy') // anonymised: no guest data
       return json(res, 200, [...blockOcc(), ...db.prepare(`SELECT id,date,start,players,type,tbl AS "table",sets,status FROM bookings WHERE (status='confirmed' OR (status='held' AND hold_until>${Date.now()})) AND date>=?`).all(istNow().d)]);
 
-    if (url.pathname === '/api/config') return json(res, 200, { enabled: PAYU(), test: E.PAYU_ENV === 'test', sets: setsAvail() });
+    if (url.pathname === '/api/config') return json(res, 200, { enabled: PAYU() || TESTPAY(), test: E.PAYU_ENV === 'test', free: TESTPAY(), sets: setsAvail() });
 
     if (url.pathname === '/api/pay/start' && req.method === 'POST') { // retry payment for a held booking
       const x = await body(req);
@@ -406,7 +407,7 @@ http.createServer(async (req, res) => {
       if (!x.agreed) errs.push('Terms must be accepted.');
       if (errs.length) return json(res, 400, { error: errs.join(' ') });
       const online = true; // all bookings are paid online
-      if (online && !PAYU()) return json(res, 400, { error: 'Online booking is temporarily unavailable. Please contact our booking team: Alka Nagpal +91 99801 36969 or Vedashree +91 98452 71738.' });
+      if (online && !PAYU() && !TESTPAY()) return json(res, 400, { error: 'Online booking is temporarily unavailable. Please contact our booking team: Alka Nagpal +91 99801 36969 or Vedashree +91 98452 71738.' });
       let b;
       db.exec('BEGIN IMMEDIATE'); // atomic: no two guests can take the same capacity
       try {
@@ -417,6 +418,11 @@ http.createServer(async (req, res) => {
           .run(b.id, b.name, b.phone, b.email, b.date, b.start, b.players, b.type, b.tbl, b.sets, b.game_fee, b.rental_fee, b.total, b.pay_method, b.pay_status, b.requests, online ? 'held' : 'confirmed', online ? Date.now() + HOLD * 60000 : null);
         db.exec('COMMIT');
       } catch (e) { db.exec('ROLLBACK'); throw e; }
+      if (online && TESTPAY()) { // testing: no payment, confirm straight away and mark as TEST
+        db.prepare('UPDATE bookings SET is_test=1,order_id=? WHERE id=?').run('TEST' + b.id.replace(/\W/g, ''), b.id);
+        const done = await confirmPaid(b.id, 'TEST-' + b.id);
+        return json(res, 201, { booking: done && !done.problem ? done : b, test: true });
+      }
       if (online) return json(res, 201, { booking: b, payu: payuStart(b, req), holdMinutes: HOLD });
       notifyBooked(b); // async, booking is already saved
       return json(res, 201, { booking: b });
