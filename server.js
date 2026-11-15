@@ -60,12 +60,19 @@ function allocate(date, s, type, n, sets, ignore, only, loc) {
 }
 function refId() { return 'MM-' + crypto.randomBytes(3).toString('hex').toUpperCase(); }
 
+async function sendOne(to, subject, html, text) {
+  try {
+    const r = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: 'Bearer ' + E.RESEND_API_KEY, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: E.FROM_EMAIL, to: [to], reply_to: E.REPLY_TO || STAFF_EMAIL, subject, html, ...(text ? { text } : {}) }) });
+    return r.ok ? 'sent' : 'failed:' + r.status + ' ' + (await r.text()).slice(0, 160);
+  } catch (e) { return 'failed'; }
+}
+// One separate email per recipient, so one blocked address can never stop the others from being delivered.
 async function sendMail(to, subject, html, text) {
   if (!E.RESEND_API_KEY || !E.FROM_EMAIL) { console.log('[email NOT sent, RESEND_API_KEY/FROM_EMAIL missing]', to, subject); return 'not_configured'; }
-  try {
-    const r = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: 'Bearer ' + E.RESEND_API_KEY, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: E.FROM_EMAIL, to: [].concat(to), reply_to: E.REPLY_TO || STAFF_EMAIL, subject, html, ...(text ? { text } : {}) }) });
-    return r.ok ? 'sent' : 'failed:' + r.status + ' ' + (await r.text()).slice(0, 200);
-  } catch (e) { return 'failed'; }
+  const list = [...new Set([].concat(to).filter(Boolean))], res = await Promise.all(list.map(x => sendOne(x, subject, html, text)));
+  const ok = res.filter(x => x === 'sent').length;
+  if (ok === res.length) return 'sent';
+  return (ok ? 'partial: ' : '') + res.map((x, i) => list[i] + '=' + x).join(' | ');
 }
 const typeLbl = t => t === 'private' ? 'Whole table' : 'Individual seats';
 const VENUE_LINES = ["Watson's Vasanth Nagar", '1st Floor, Kodava Samaja Building', 'Vasanth Nagar, Bengaluru, Karnataka 560001'];
@@ -498,11 +505,15 @@ http.createServer(async (req, res) => {
       if (url.pathname.startsWith('/admin/api/')) return await adminApi(req, res, url, sess);
       if (sess.role !== 'admin') return json(res, 403, { error: 'Admin access required.' });
       if (url.pathname === '/admin/test-email') {
-        const to = url.searchParams.get('to') || STAFF_EMAIL;
+        const tos = [].concat(url.searchParams.get('to') || STAFF_EMAIL);
         res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
         if (!E.RESEND_API_KEY || !E.FROM_EMAIL) return res.end('RESEND_API_KEY or FROM_EMAIL is missing in Render Environment.\nKey set: ' + !!E.RESEND_API_KEY + '\nFrom set: ' + !!E.FROM_EMAIL);
-        const r = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: 'Bearer ' + E.RESEND_API_KEY, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: E.FROM_EMAIL, to: [to], subject: 'Mahjong Madness test email', html: '<p>Test email works.</p>' }) });
-        return res.end('To: ' + to + '\nFrom: ' + E.FROM_EMAIL + '\nKey starts with: ' + E.RESEND_API_KEY.slice(0, 3) + '\nResend status: ' + r.status + '\nResend reply: ' + await r.text());
+        const out = ['From: ' + E.FROM_EMAIL, 'Key starts with: ' + E.RESEND_API_KEY.slice(0, 3), 'Reply-To: ' + [].concat(E.REPLY_TO || STAFF_EMAIL).join(', '), ''];
+        for (const to of tos) {
+          const r = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: 'Bearer ' + E.RESEND_API_KEY, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: E.FROM_EMAIL, to: [to], subject: 'Mahjong Madness test email', html: '<p>Test email works.</p>' }) });
+          out.push('To: ' + to, 'Resend status: ' + r.status, 'Resend reply: ' + await r.text(), '');
+        }
+        return res.end(out.join('\n'));
       }
       const rows = db.prepare('SELECT * FROM bookings ORDER BY date DESC,start DESC').all();
       if (url.pathname === '/admin/export.csv') {
