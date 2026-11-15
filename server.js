@@ -25,6 +25,8 @@ const formBody = req => new Promise((ok, no) => { let d = ''; req.on('data', c =
 db.exec(`CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT)`);
 db.exec(`CREATE TABLE IF NOT EXISTS blocks(id INTEGER PRIMARY KEY AUTOINCREMENT, tbl INTEGER, date TEXT, start INTEGER, end INTEGER, reason TEXT)`);
 db.exec(`CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, name TEXT, role TEXT, pass TEXT, active INTEGER DEFAULT 1, created_at TEXT DEFAULT CURRENT_TIMESTAMP, last_login TEXT)`);
+try { db.exec("ALTER TABLE users ADD COLUMN outlets TEXT DEFAULT ''"); } catch {}
+db.exec("UPDATE users SET outlets='vasanth-nagar' WHERE role='staff' AND (outlets IS NULL OR outlets='')"); // older outlet users keep working
 db.exec(`CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, username TEXT, expires INTEGER)`);
 db.exec(`CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT, username TEXT, action TEXT, detail TEXT, ip TEXT)`);
 try { db.exec("ALTER TABLE blocks ADD COLUMN loc TEXT DEFAULT 'vasanth-nagar'"); } catch {}
@@ -178,8 +180,10 @@ async function adminApi(req, res, url, sess) {
   const p = url.pathname.slice('/admin/api/'.length), j = (c, o) => json(res, c, o), now = istNow();
   if (ADMIN_ONLY.has(p) && sess.role !== 'admin') return j(403, { error: 'Admin access required.' });
   const g = k => url.searchParams.get(k) || '';
-  if (p === 'me') return j(200, { user: sess.user, role: sess.role, owner: sess.user === OWNER(), test_mode: TESTPAY(), locs: LOCS });
-  if (p === 'users') return j(200, { owner: OWNER(), users: db.prepare('SELECT id,username,name,role,active,created_at,last_login FROM users ORDER BY username').all() });
+  const okLoc = l => sess.outlets.includes(l), myLocs = Object.fromEntries(sess.outlets.map(l => [l, LOCS[l]])), pickLoc = l => okLoc(l) ? l : sess.outlets[0];
+  if (p === 'me') return j(200, { user: sess.user, role: sess.role, owner: sess.user === OWNER(), test_mode: TESTPAY(), locs: myLocs, outlets: sess.outlets });
+  if (!sess.outlets.length && p !== 'me/password' && p !== 'export-log') return j(403, { error: 'No outlet is assigned to your account. Please ask an admin.' });
+  if (p === 'users') return j(200, { owner: OWNER(), users: db.prepare('SELECT id,username,name,role,outlets,active,created_at,last_login FROM users ORDER BY username').all() });
   if (p === 'audit') {
     const from = g('from'), to = g('to'), usr = g('user'), act = g('action'), q = g('q').toLowerCase();
     const all = db.prepare('SELECT * FROM audit ORDER BY id DESC LIMIT 5000').all();
@@ -188,7 +192,7 @@ async function adminApi(req, res, url, sess) {
   }
   if (p === 'guests') {
     const q = g('q').toLowerCase().trim(), m = new Map();
-    for (const b of db.prepare(`SELECT * FROM bookings WHERE status IN ('confirmed','cancelled') ORDER BY date,start`).all()) {
+    for (const b of db.prepare(`SELECT * FROM bookings WHERE status IN ('confirmed','cancelled') ORDER BY date,start`).all().filter(b => okLoc(b.loc))) {
       const k = String(b.phone).slice(-10); let a = m.get(k);
       if (!a) m.set(k, a = { phone: k, name: b.name, email: '', bookings: 0, cancelled: 0, paid: 0, refunded: 0, first: b.date, last: b.date, last_id: b.id });
       a.name = b.name; if (b.email) a.email = b.email; a.last = b.date; a.last_id = b.id;
@@ -215,7 +219,7 @@ async function adminApi(req, res, url, sess) {
   }
   if (p === 'day') {
     const d = url.searchParams.get('date') || now.d;
-    const loc = LOCS[g('loc')] ? g('loc') : DEFAULT_LOC;
+    const loc = pickLoc(g('loc'));
     const b = db.prepare(`SELECT * FROM bookings WHERE date=? AND loc=? AND (status='confirmed' OR (status='held' AND hold_until>?)) ORDER BY start`).all(d, loc, Date.now());
     return j(200, { date: d, loc, tables: CFG.tables, bookings: b, blocks: db.prepare('SELECT * FROM blocks WHERE date=? AND loc=? ORDER BY start').all(d, loc), sets: { total: getSet(skey('sets_total', loc), CFG.sets), damaged: getSet(skey('sets_damaged', loc), 0), booked: b.reduce((a, x) => a + x.sets, 0) } });
   }
@@ -224,7 +228,7 @@ async function adminApi(req, res, url, sess) {
     let r = db.prepare('SELECT * FROM bookings ORDER BY date DESC,start DESC').all();
     r = r.filter(b => {
       if (st === 'any' ? false : st === 'active' ? !['confirmed', 'held'].includes(b.status) : st === 'all' ? b.status === 'failed' : b.status !== st) return false;
-      if (g('loc') && b.loc !== g('loc')) return false;
+      if (!okLoc(b.loc) || (g('loc') && b.loc !== g('loc'))) return false;
       if (pm === 'online' && b.pay_method !== 'Online') return false;
       if (pm === 'venue' && b.pay_method === 'Online') return false;
       if (ps === 'paid' && b.pay_status !== 'Paid') return false;
@@ -238,10 +242,10 @@ async function adminApi(req, res, url, sess) {
     const ok = r.filter(b => b.status === 'confirmed'), sum = (a, f) => a.reduce((t, b) => t + (+f(b) || 0), 0);
     return j(200, { bookings: r.slice(0, 500), totals: { count: r.length, players: sum(ok, b => b.players), game: sum(ok, b => b.game_fee), rental: sum(ok, b => b.rental_fee), total: sum(ok, b => b.total), paid: sum(ok.filter(b => b.pay_status === 'Paid'), b => b.total), pending: sum(ok.filter(b => b.pay_status !== 'Paid'), b => b.total), online: sum(ok.filter(b => b.pay_method === 'Online'), b => b.total), cancelled: r.filter(b => b.status === 'cancelled').length, refunds: r.filter(b => b.refund_status === 'Refund due' || b.refund_status === 'Refund failed').length } });
   }
-  if (p === 'booking') { const b = db.prepare('SELECT * FROM bookings WHERE id=?').get(url.searchParams.get('id') || ''); return b ? j(200, { booking: b }) : j(404, { error: 'Not found' }); }
-  if (p === 'blocks') return j(200, { blocks: db.prepare('SELECT * FROM blocks WHERE date>=? AND loc=? ORDER BY date,start').all(now.d, LOCS[g('loc')] ? g('loc') : DEFAULT_LOC) });
+  if (p === 'booking') { const b = db.prepare('SELECT * FROM bookings WHERE id=?').get(url.searchParams.get('id') || ''); return b && okLoc(b.loc) ? j(200, { booking: b }) : j(404, { error: 'Not found' }); }
+  if (p === 'blocks') return j(200, { blocks: db.prepare('SELECT * FROM blocks WHERE date>=? AND loc=? ORDER BY date,start').all(now.d, pickLoc(g('loc'))) });
   if (req.method !== 'POST') return j(404, { error: 'Not found' });
-  const x = await body(req), live = id => db.prepare(`SELECT * FROM bookings WHERE id=? AND status IN ('confirmed','held')`).get(id || '');
+  const x = await body(req), live = id => { const b = db.prepare(`SELECT * FROM bookings WHERE id=? AND status IN ('confirmed','held')`).get(id || ''); return b && okLoc(b.loc) ? b : undefined; };
   if (p === 'cancel') {
     const b = live(x.id); if (!b) return j(404, { error: 'Booking not found.' });
     const refund = cancelRow(b);
@@ -269,7 +273,8 @@ async function adminApi(req, res, url, sess) {
     return j(200, { ok: true });
   }
   if (p === 'block') {
-    const t = +x.tbl, st = +x.start, en = +x.end, loc = LOCS[x.loc] ? x.loc : DEFAULT_LOC;
+    const t = +x.tbl, st = +x.start, en = +x.end, loc = x.loc;
+    if (!okLoc(loc)) return j(403, { error: 'You do not have access to that outlet.' });
     if (!/^\d{4}-\d{2}-\d{2}$/.test(x.date || '') || !(t >= -1 && t < CFG.tables) || !(st >= CFG.open && en <= CFG.close && en > st)) return j(400, { error: 'Invalid date, table or time.' });
     let conflicts = 0;
     for (const tt of t === -1 ? [0, 1, 2, 3] : [t]) {
@@ -280,7 +285,7 @@ async function adminApi(req, res, url, sess) {
     return j(200, { ok: true, conflicts });
   }
   if (p === 'book') { // staff-created (phone / walk-in) booking
-    const loc = LOCS[x.loc] ? x.loc : DEFAULT_LOC, n = +x.players, q = +x.sets || 0, st = +x.start, only = (x.tbl === '' || x.tbl == null || +x.tbl < 0) ? undefined : +x.tbl;
+    const loc = okLoc(x.loc) ? x.loc : sess.outlets[0], n = +x.players, q = +x.sets || 0, st = +x.start, only = (x.tbl === '' || x.tbl == null || +x.tbl < 0) ? undefined : +x.tbl;
     const errs = [];
     if (!/^\d{4}-\d{2}-\d{2}$/.test(x.date || '') || x.date < now.d) errs.push('Choose today or a future date.');
     if (!Number.isInteger(st) || st < CFG.open || st + CFG.dur > CFG.close || (st - CFG.open) % CFG.step) errs.push('Invalid time.');
@@ -315,16 +320,21 @@ async function adminApi(req, res, url, sess) {
     if (un === OWNER() || db.prepare('SELECT 1 FROM users WHERE username=?').get(un)) return j(409, { error: 'That user ID already exists.' });
     if (!['admin', 'staff'].includes(x.role)) return j(400, { error: 'Choose a role.' });
     if (String(x.password || '').length < 8) return j(400, { error: 'Password must be at least 8 characters.' });
-    db.prepare('INSERT INTO users(username,name,role,pass) VALUES(?,?,?,?)').run(un, String(x.name || '').trim().slice(0, 60), x.role, hashPw(String(x.password)));
-    audit(req, sess.user, 'user_created', un + ' (' + x.role + ')'); return j(200, { ok: true });
+    const outs = x.role === 'admin' ? [] : [].concat(x.outlets || []).filter(l => LOCS[l]);
+    if (x.role === 'staff' && !outs.length) return j(400, { error: 'Choose at least one outlet for an outlet user.' });
+    db.prepare('INSERT INTO users(username,name,role,pass,outlets) VALUES(?,?,?,?,?)').run(un, String(x.name || '').trim().slice(0, 60), x.role, hashPw(String(x.password)), outs.join(','));
+    audit(req, sess.user, 'user_created', un + ' (' + (x.role === 'admin' ? 'admin, all outlets' : 'outlet user: ' + outs.map(locName).join(', ')) + ')'); return j(200, { ok: true });
   }
   if (p === 'user/update') {
     const u = db.prepare('SELECT * FROM users WHERE id=?').get(+x.id); if (!u) return j(404, { error: 'User not found.' });
     if (u.username === sess.user && (x.active === 0 || x.active === false)) return j(400, { error: 'You cannot disable your own account.' });
     const role = ['admin', 'staff'].includes(x.role) ? x.role : u.role, active = x.active === undefined ? u.active : (x.active ? 1 : 0);
-    db.prepare('UPDATE users SET role=?,active=? WHERE id=?').run(role, active, u.id);
+    let outs = role === 'admin' ? [] : (x.outlets === undefined ? String(u.outlets || '').split(',').filter(l => LOCS[l]) : [].concat(x.outlets || []).filter(l => LOCS[l]));
+    if (role === 'staff' && !outs.length) return j(400, { error: 'Choose at least one outlet for an outlet user.' });
+    const nm = x.name === undefined ? u.name : String(x.name).trim().slice(0, 60);
+    db.prepare('UPDATE users SET role=?,active=?,outlets=?,name=? WHERE id=?').run(role, active, outs.join(','), nm, u.id);
     if (!active) db.prepare('DELETE FROM sessions WHERE username=?').run(u.username);
-    audit(req, sess.user, 'user_updated', u.username + ' role=' + role + ' active=' + active); return j(200, { ok: true });
+    audit(req, sess.user, 'user_updated', u.username + ' role=' + role + ' active=' + active + ' outlets=' + (role === 'admin' ? 'all' : outs.map(locName).join(', '))); return j(200, { ok: true });
   }
   if (p === 'user/password') {
     const u = db.prepare('SELECT * FROM users WHERE id=?').get(+x.id); if (!u) return j(404, { error: 'User not found.' });
@@ -332,7 +342,7 @@ async function adminApi(req, res, url, sess) {
     db.prepare('UPDATE users SET pass=? WHERE id=?').run(hashPw(String(x.password)), u.id); db.prepare('DELETE FROM sessions WHERE username=?').run(u.username);
     audit(req, sess.user, 'password_reset', u.username); return j(200, { ok: true });
   }
-  if (p === 'unblock') { db.prepare('DELETE FROM blocks WHERE id=?').run(+x.id); audit(req, sess.user, 'unblock_table', 'block #' + x.id); return j(200, { ok: true }); }
+  if (p === 'unblock') { const bl = db.prepare('SELECT loc FROM blocks WHERE id=?').get(+x.id); if (!bl || !okLoc(bl.loc)) return j(404, { error: 'Block not found.' }); db.prepare('DELETE FROM blocks WHERE id=?').run(+x.id); audit(req, sess.user, 'unblock_table', 'block #' + x.id); return j(200, { ok: true }); }
   if (p === 'settings') {
     const up = (k, v) => db.prepare('INSERT INTO settings(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v').run(k, String(v));
     const tot = Math.max(0, Math.min(200, +x.sets_total | 0)), dmg = Math.max(0, Math.min(tot, +x.sets_damaged | 0));
@@ -352,9 +362,10 @@ function audit(req, user, action, detail) { db.prepare('INSERT INTO audit(at,use
 function getSession(req) {
   const m = /(?:^|; )mm_session=([a-f0-9]{64})/.exec(req.headers.cookie || ''); if (!m) return null;
   const s = db.prepare('SELECT * FROM sessions WHERE token=? AND expires>?').get(sha(m[1]), Date.now()); if (!s) return null;
-  if (s.username === OWNER()) return { user: s.username, role: 'admin' };
-  const u = db.prepare('SELECT active,role FROM users WHERE username=?').get(s.username);
-  return u && u.active ? { user: s.username, role: u.role } : null;
+  if (s.username === OWNER()) return { user: s.username, role: 'admin', outlets: Object.keys(LOCS) };
+  const u = db.prepare('SELECT active,role,outlets FROM users WHERE username=?').get(s.username);
+  if (!u || !u.active) return null;
+  return { user: s.username, role: u.role, outlets: u.role === 'admin' ? Object.keys(LOCS) : String(u.outlets || '').split(',').filter(l => LOCS[l]) };
 }
 function doLogin(req, username, password) {
   const un = String(username || '').trim().toLowerCase(), pw = String(password || ''); let ok = false;
