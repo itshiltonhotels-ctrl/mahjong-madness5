@@ -7,7 +7,9 @@ import { DatabaseSync } from 'node:sqlite';
 const E = process.env;
 const PORT = E.PORT || 3000;
 const CFG = { tables: 4, cap: 4, fee: 1000, rent: 500, sets: +(E.RENTAL_SETS || 8), open: 720, close: 1200, dur: 120, step: 30 };
-const STAFF_EMAIL = E.STAFF_EMAIL || 'murali.dg@shiltonhospitality.com';
+const STAFF_EMAIL = [...new Set([...(E.STAFF_EMAIL || 'murali.dg@shiltonhospitality.com').split(','), ...(E.STAFF_EMAIL_2 || 'alkanagpal@hotmail.com').split(',')].map(x => x.trim()).filter(Boolean))]; // everyone who gets booking alerts
+const LOCS = { 'vasanth-nagar': "Watson's Vasanth Nagar", 'ulsoor': "Watson's Ulsoor", 'indiranagar': "Watson's Indiranagar", 'starlight': 'STARLIGHT BAR & RESTAURANT' };
+const DEFAULT_LOC = 'vasanth-nagar', locName = l => LOCS[l] || LOCS[DEFAULT_LOC];
 const db = new DatabaseSync(E.DB_PATH || 'bookings.db');
 db.exec(`CREATE TABLE IF NOT EXISTS bookings(
  id TEXT PRIMARY KEY, name TEXT, phone TEXT, email TEXT, date TEXT, start INTEGER,
@@ -15,7 +17,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS bookings(
  games INTEGER DEFAULT 1, pay_method TEXT DEFAULT 'Pay at venue', pay_status TEXT DEFAULT 'Pending',
  status TEXT DEFAULT 'confirmed', requests TEXT, cancelled_at TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, email_status TEXT)`);
 
-for (const c of ['hold_until INTEGER', 'order_id TEXT', 'payment_id TEXT', 'refund_status TEXT', 'refund_ref TEXT', 'refund_note TEXT', 'paid_at TEXT', 'is_test INTEGER DEFAULT 0']) { try { db.exec('ALTER TABLE bookings ADD COLUMN ' + c); } catch {} }
+for (const c of ['hold_until INTEGER', 'order_id TEXT', 'payment_id TEXT', 'refund_status TEXT', 'refund_ref TEXT', 'refund_note TEXT', 'paid_at TEXT', 'is_test INTEGER DEFAULT 0', "loc TEXT DEFAULT 'vasanth-nagar'"]) { try { db.exec('ALTER TABLE bookings ADD COLUMN ' + c); } catch {} }
 const HOLD = +(E.HOLD_MINUTES || 10), PAYU = () => !!(E.PAYU_KEY && E.PAYU_SALT), TESTPAY = () => E.TEST_MODE === 'on'; // TEST_MODE=on: bookings confirm with NO payment (testing only)
 const sha512 = t => crypto.createHash('sha512').update(t).digest('hex');
 const safeEq = (a, b) => { a = Buffer.from(String(a)); b = Buffer.from(String(b)); return a.length === b.length && crypto.timingSafeEqual(a, b); };
@@ -25,12 +27,14 @@ db.exec(`CREATE TABLE IF NOT EXISTS blocks(id INTEGER PRIMARY KEY AUTOINCREMENT,
 db.exec(`CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, name TEXT, role TEXT, pass TEXT, active INTEGER DEFAULT 1, created_at TEXT DEFAULT CURRENT_TIMESTAMP, last_login TEXT)`);
 db.exec(`CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, username TEXT, expires INTEGER)`);
 db.exec(`CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT, username TEXT, action TEXT, detail TEXT, ip TEXT)`);
+try { db.exec("ALTER TABLE blocks ADD COLUMN loc TEXT DEFAULT 'vasanth-nagar'"); } catch {}
 const getSet = (k, d) => { const r = db.prepare('SELECT v FROM settings WHERE k=?').get(k); return r ? +r.v : d; };
-const setsAvail = () => Math.max(0, getSet('sets_total', CFG.sets) - getSet('sets_damaged', 0));
+const skey = (k, l) => !l || l === DEFAULT_LOC ? k : k + ':' + l;
+const setsAvail = l => Math.max(0, getSet(skey('sets_total', l), CFG.sets) - getSet(skey('sets_damaged', l), 0));
 function blockOcc() { // table closures shown to the booking page as occupied tables
   const out = [];
   for (const k of db.prepare('SELECT * FROM blocks WHERE date>=?').all(istNow().d)) {
-    for (let x = k.start; x <= Math.max(k.start, k.end - CFG.dur); x += CFG.step) out.push({ id: 'blk' + k.id, date: k.date, start: x, players: CFG.cap, type: 'private', table: k.tbl, sets: 0, status: 'confirmed' });
+    for (let x = k.start; x <= Math.max(k.start, k.end - CFG.dur); x += CFG.step) out.push({ id: 'blk' + k.id, date: k.date, start: x, players: CFG.cap, type: 'private', table: k.tbl, sets: 0, status: 'confirmed', loc: k.loc || DEFAULT_LOC });
   }
   return out;
 }
@@ -40,13 +44,13 @@ const rng = s => fmt(s) + ' – ' + fmt(s + CFG.dur);
 const istNow = () => { const p = new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Kolkata' }); return { d: p.slice(0, 10), m: +p.slice(11, 13) * 60 + +p.slice(14, 16), t: Date.parse(p.replace(' ', 'T') + 'Z') }; };
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
-function overlapping(date, s, ignore) {
-  return db.prepare(`SELECT * FROM bookings WHERE (status='confirmed' OR (status='held' AND hold_until>?)) AND date=? AND id<>? AND ABS(start-?)<?`).all(Date.now(), date, ignore || '', s, CFG.dur);
+function overlapping(date, s, ignore, loc) {
+  return db.prepare(`SELECT * FROM bookings WHERE (status='confirmed' OR (status='held' AND hold_until>?)) AND date=? AND id<>? AND ABS(start-?)<? AND loc=?`).all(Date.now(), date, ignore || '', s, CFG.dur, loc || DEFAULT_LOC);
 }
-function allocate(date, s, type, n, sets, ignore, only) {
-  const ex = overlapping(date, s, ignore);
-  if (setsAvail() - ex.reduce((a, b) => a + b.sets, 0) < sets) return -1;
-  const bl = db.prepare('SELECT tbl FROM blocks WHERE date=? AND start<? AND end>?').all(date, s + CFG.dur, s).map(r => r.tbl);
+function allocate(date, s, type, n, sets, ignore, only, loc) {
+  const ex = overlapping(date, s, ignore, loc);
+  if (setsAvail(loc) - ex.reduce((a, b) => a + b.sets, 0) < sets) return -1;
+  const bl = db.prepare('SELECT tbl FROM blocks WHERE date=? AND start<? AND end>? AND loc=?').all(date, s + CFG.dur, s, loc || DEFAULT_LOC).map(r => r.tbl);
   for (let t = 0; t < CFG.tables; t++) {
     if (bl.includes(t) || (only != null && t !== only)) continue;
     const on = ex.filter(b => b.tbl === t);
@@ -56,28 +60,59 @@ function allocate(date, s, type, n, sets, ignore, only) {
 }
 function refId() { return 'MM-' + crypto.randomBytes(3).toString('hex').toUpperCase(); }
 
-async function sendMail(to, subject, html) {
+async function sendMail(to, subject, html, text) {
   if (!E.RESEND_API_KEY || !E.FROM_EMAIL) { console.log('[email NOT sent, RESEND_API_KEY/FROM_EMAIL missing]', to, subject); return 'not_configured'; }
   try {
-    const r = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: 'Bearer ' + E.RESEND_API_KEY, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: E.FROM_EMAIL, to: [to], subject, html }) });
+    const r = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: 'Bearer ' + E.RESEND_API_KEY, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: E.FROM_EMAIL, to: [].concat(to), reply_to: E.REPLY_TO || STAFF_EMAIL, subject, html, ...(text ? { text } : {}) }) });
     return r.ok ? 'sent' : 'failed:' + r.status + ' ' + (await r.text()).slice(0, 200);
   } catch (e) { return 'failed'; }
 }
-const VENUE = "Watson's Vasanth Nagar,<br>1st Floor, Kodava Samaja Building,<br>Vasanth Nagar, Bengaluru, Karnataka 560001.";
-const typeLbl = t => t === 'private' ? 'Private Table' : 'Individual Seats';
-function details(b) {
-  return `Booking ID: ${b.id}<br>Date: ${b.date}<br>Time: ${rng(b.start)}<br>People: ${b.players}<br>Game: Three rounds<br>Booking: One whole table<br>Table Fee: ₹${b.game_fee}<br>Mahjong Sets Rented: ${b.sets}<br>Set Rental: ₹${b.rental_fee}<br>Total Amount: ₹${b.total}<br>Payment: ${b.pay_method} (${b.pay_status})`;
+const typeLbl = t => t === 'private' ? 'Whole table' : 'Individual seats';
+const VENUE_LINES = ["Watson's Vasanth Nagar", '1st Floor, Kodava Samaja Building', 'Vasanth Nagar, Bengaluru, Karnataka 560001'];
+const MAPS = 'https://www.google.com/maps/search/?api=1&query=Kodava+Samaja+Vasanth+Nagar+Bengaluru+560001';
+const inr2 = n => '₹' + Number(n || 0).toLocaleString('en-IN');
+const fmtDate = d => new Date(d + 'T00:00:00Z').toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+const payText = b => b.is_test ? 'Paid online (TEST: no money taken)' : b.pay_status === 'Paid' ? 'Paid online' : b.pay_method === 'Online' ? 'Online payment: ' + b.pay_status : b.pay_method + ' (' + b.pay_status + ')';
+const stripTags = v => String(v).replace(/<br\s*\/?>/gi, ', ').replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"');
+// Builds a clean, mobile-friendly HTML email (tables + inline styles work in Gmail/Outlook) and a plain-text copy.
+function mailDoc({ title, badge, intro, sections = [], outro, button }) {
+  const F = 'font-family:Arial,Helvetica,sans-serif;';
+  const tbl = rows => `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e3ddca;border-radius:10px;border-collapse:separate;overflow:hidden;background:#ffffff">${rows.map(([l, v, bold], i) => `<tr><td style="padding:10px 14px;width:38%;${F}font-size:13px;font-weight:bold;color:#5b6270;${i ? 'border-top:1px solid #eee9da;' : ''}vertical-align:top">${l}</td><td style="padding:10px 14px;${F}font-size:15px;color:#22252D;${bold ? 'font-weight:bold;' : ''}${i ? 'border-top:1px solid #eee9da;' : ''}vertical-align:top">${v}</td></tr>`).join('')}</table>`;
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title></head><body style="margin:0;padding:0;background:#F7F3E9"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F7F3E9"><tr><td align="center" style="padding:20px 10px"><table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:100%;max-width:600px;background:#F7F3E9">
+<tr><td style="background:#101F46;padding:20px 24px;border-radius:12px 12px 0 0"><span style="${F}font-size:20px;font-weight:bold;letter-spacing:2px;color:#F5D442">MAHJONG MADNESS</span>${badge ? `<span style="${F}font-size:12px;font-weight:bold;color:#ffffff;background:#c0392b;padding:3px 9px;border-radius:99px;margin-left:10px">${badge}</span>` : ''}</td></tr>
+<tr><td style="background:#ffffff;padding:26px 24px 8px;border-left:1px solid #e3ddca;border-right:1px solid #e3ddca"><h1 style="margin:0 0 12px;${F}font-size:24px;line-height:1.2;color:#101F46">${title}</h1>${intro ? `<p style="margin:0 0 16px;${F}font-size:15px;line-height:1.6;color:#22252D">${intro}</p>` : ''}</td></tr>
+<tr><td style="background:#ffffff;padding:0 24px 22px;border-left:1px solid #e3ddca;border-right:1px solid #e3ddca">${sections.map(x => `${x.heading ? `<p style="margin:18px 0 8px;${F}font-size:12px;font-weight:bold;letter-spacing:1.5px;color:#101F46;text-transform:uppercase">${x.heading}</p>` : '<div style="height:4px"></div>'}${tbl(x.rows)}`).join('')}${button ? `<p style="margin:22px 0 0"><a href="${button[1]}" style="display:inline-block;background:#F5D442;color:#101F46;${F}font-size:15px;font-weight:bold;text-decoration:none;padding:12px 22px;border-radius:8px">${button[0]}</a></p>` : ''}${outro ? `<p style="margin:22px 0 0;${F}font-size:15px;line-height:1.6;color:#22252D">${outro}</p>` : ''}</td></tr>
+<tr><td style="background:#101F46;padding:16px 24px;border-radius:0 0 12px 12px;${F}font-size:12px;line-height:1.6;color:#dcdff0">Mahjong Madness<br>Exclusively curated by Watson's Cantina.</td></tr></table></td></tr></table></body></html>`;
+  const text = [title, '', intro ? stripTags(intro) : '', ...sections.flatMap(x => [x.heading ? '\n' + x.heading.toUpperCase() : '', ...x.rows.map(([l, v]) => l + ': ' + stripTags(v))]), button ? '\n' + button[0] + ': ' + button[1] : '', outro ? '\n' + stripTags(outro) : '', '\nMahjong Madness. Exclusively curated by Watson\'s Cantina.'].filter(x => x !== '').join('\n');
+  return { html, text };
 }
+const adminUrl = () => E.PUBLIC_URL ? ['Open the admin dashboard', E.PUBLIC_URL.replace(/\/$/, '') + '/admin'] : null;
+const bookingRows = (b, staff) => [['Booking ID', b.id, true], ['Location', esc(locName(b.loc))], ['Date', fmtDate(b.date)], ['Time', rng(b.start)], ...(staff ? [['Assigned table', 'Table ' + (b.tbl + 1)]] : []), ['People', b.players], ['Game', 'Three rounds'], ['Booking', 'One whole table'], ['Complimentary', 'One soft beverage'], ['Mahjong sets rented', b.sets]];
+const moneyRows = b => [['Table fee', inr2(b.game_fee)], ['Set rental', inr2(b.rental_fee)], ['Total amount', inr2(b.total), true], ['Payment', payText(b)]];
 async function notifyBooked(b) {
-  const guest = !b.email ? 'no_email' : await sendMail(b.email, (b.is_test ? '[TEST] ' : '') + 'Your Mahjong Madness booking is confirmed!',
-    `<p>Hey ${esc(b.name)},</p><p>You're booked!<br>Your Mahjong Madness game at Watson's Vasanth Nagar is confirmed.</p><p>Here are your booking details:<br>${details(b)}</p><p>Venue:<br>${VENUE}</p><p>Get your crew together and get ready for some Mahjong madness!<br>See you at the table.</p><p>Exclusively curated by Watson's Cantina.</p>`);
-  const staff = await sendMail(STAFF_EMAIL, `${b.is_test ? '[TEST] ' : ''}NEW BOOKING ${b.id}: ${b.date} ${rng(b.start)} (${b.players} players)`,
-    `<p><b>New Mahjong Madness booking</b></p><p>${details(b)}</p><p>Guest: ${esc(b.name)}<br>Mobile: ${esc(b.phone)}<br>Email: ${esc(b.email)}<br>Assigned table: ${b.tbl + 1}<br>Special requests: ${esc(b.requests) || 'None'}</p>`);
+  const T = b.is_test ? '[TEST] ' : '', tag = b.is_test ? 'TEST' : '';
+  const g = mailDoc({ title: "You're booked!", badge: tag, intro: `Hey ${esc(b.name)},<br>Your Mahjong Madness game at ${esc(locName(b.loc))} is confirmed.<br>Here are your booking details:`,
+    sections: [{ rows: [...bookingRows(b), ...moneyRows(b)] }, { heading: 'Venue', rows: (b.loc || DEFAULT_LOC) === DEFAULT_LOC ? [['Address', VENUE_LINES.join('<br>')], ['Directions', `<a href="${MAPS}" style="color:#101F46">Open in Google Maps</a>`]] : [['Location', esc(locName(b.loc))]] }],
+    outro: 'Get your crew together and get ready for some Mahjong madness!<br>See you at the table.' });
+  const guest = !b.email ? 'no_email' : await sendMail(b.email, T + 'Your Mahjong Madness booking is confirmed!', g.html, g.text);
+  const st = mailDoc({ title: 'New Mahjong Madness booking', badge: tag, intro: b.is_test ? 'This is a TEST booking: no money was taken.' : '',
+    sections: [{ heading: 'Booking', rows: bookingRows(b, true) }, { heading: 'Payment', rows: [...moneyRows(b), ...(b.payment_id ? [['Payment ID', esc(b.payment_id)]] : [])] },
+      { heading: 'Guest', rows: [['Name', esc(b.name)], ['Mobile', `<a href="tel:+91${String(b.phone).slice(-10)}" style="color:#101F46">${esc(b.phone)}</a>`], ['Email', b.email ? `<a href="mailto:${esc(b.email)}" style="color:#101F46">${esc(b.email)}</a>` : 'Not given'], ['Special requests', esc(b.requests) || 'None']] }], button: adminUrl() });
+  const staff = await sendMail(STAFF_EMAIL, `${T}NEW BOOKING ${b.id} (${locName(b.loc)}): ${b.date} ${rng(b.start)} (${b.players} people)`, st.html, st.text);
   db.prepare('UPDATE bookings SET email_status=? WHERE id=?').run(`guest:${guest}; staff:${staff}`, b.id);
 }
 async function notifyCancelled(b) {
-  if (b.email) await sendMail(b.email, 'Your Mahjong Madness booking has been cancelled.', `<p>Hey ${esc(b.name)},</p><p>Your Mahjong Madness booking has been cancelled.</p><p>Booking ID: ${b.id}<br>Date: ${b.date}<br>Time: ${rng(b.start)}</p><p>If your booking was paid online and is eligible for a refund, the applicable refund information will be shared through the configured payment process.</p><p>Hope to see you at the table another time!</p>`);
-  await sendMail(STAFF_EMAIL, `CANCELLED ${b.id}: ${b.date} ${rng(b.start)}`, `<p>Booking cancelled by guest.</p><p>${details(b)}</p><p>Guest: ${esc(b.name)}, ${esc(b.phone)}</p>`);
+  const T = b.is_test ? '[TEST] ' : '', tag = b.is_test ? 'TEST' : '', refund = b.pay_method === 'Online' && b.pay_status === 'Paid' && !b.is_test;
+  if (b.email) { const g = mailDoc({ title: 'Your booking has been cancelled', badge: tag, intro: `Hey ${esc(b.name)},<br>Your Mahjong Madness booking has been cancelled.`, sections: [{ rows: [['Booking ID', b.id, true], ['Location', esc(locName(b.loc))], ['Date', fmtDate(b.date)], ['Time', rng(b.start)]] }],
+    outro: 'If your booking was paid online and is eligible for a refund, the applicable refund information will be shared through the configured payment process.<br><br>Hope to see you at the table another time!' });
+    await sendMail(b.email, T + 'Your Mahjong Madness booking has been cancelled.', g.html, g.text); }
+  const st = mailDoc({ title: 'Booking cancelled', badge: tag, intro: refund ? '<b>A refund is due for this booking.</b> Open the admin dashboard to refund it.' : 'This booking was cancelled.',
+    sections: [{ heading: 'Booking', rows: bookingRows(b, true) }, { heading: 'Payment', rows: moneyRows(b) }, { heading: 'Guest', rows: [['Name', esc(b.name)], ['Mobile', esc(b.phone)], ['Email', esc(b.email) || 'Not given']] }], button: adminUrl() });
+  await sendMail(STAFF_EMAIL, `${T}CANCELLED ${b.id} (${locName(b.loc)}): ${b.date} ${rng(b.start)}`, st.html, st.text);
+}
+function alertMail(subject, title, intro, b, extraRows = []) {
+  const m = mailDoc({ title, intro, sections: [{ rows: [['Booking ID', b.id, true], ['Date', fmtDate(b.date)], ['Time', rng(b.start)], ['Guest', esc(b.name)], ['Mobile', esc(b.phone)], ['Total amount', inr2(b.total), true], ...extraRows] }], button: adminUrl() });
+  return sendMail(STAFF_EMAIL, subject, m.html, m.text);
 }
 
 // ---- PayU: build the signed payment form (the salt never leaves the server) ----
@@ -117,10 +152,10 @@ async function confirmPaid(id, paymentId) {
   if (b.status === 'confirmed') return b;
   if (b.status !== 'held') return { ...b, problem: true };
   if (b.hold_until < Date.now()) { // hold expired: only confirm if capacity is still free
-    const t = allocate(b.date, b.start, b.type, b.players, b.sets, b.id);
+    const t = allocate(b.date, b.start, b.type, b.players, b.sets, b.id, undefined, b.loc);
     if (t < 0) {
       db.prepare(`UPDATE bookings SET status='paid_conflict',payment_id=?,pay_status='Paid - NEEDS REFUND' WHERE id=?`).run(paymentId, b.id);
-      sendMail(STAFF_EMAIL, 'ACTION NEEDED: paid booking ' + b.id + ' has no free table', '<p>The guest paid after the hold expired and the slot was taken. Please contact ' + esc(b.name) + ', ' + esc(b.phone) + ' and arrange a refund. Payment ID: ' + esc(paymentId) + '</p>');
+      alertMail('ACTION NEEDED: paid booking ' + b.id + ' has no free table', 'Action needed: paid booking, no free table', 'The guest paid after the table hold expired and the slot was taken. Please contact the guest and arrange a refund.', b, [['Payment ID', esc(paymentId)]]);
       return { ...b, problem: true };
     }
     db.prepare('UPDATE bookings SET tbl=? WHERE id=?').run(t, b.id);
@@ -136,7 +171,7 @@ async function adminApi(req, res, url, sess) {
   const p = url.pathname.slice('/admin/api/'.length), j = (c, o) => json(res, c, o), now = istNow();
   if (ADMIN_ONLY.has(p) && sess.role !== 'admin') return j(403, { error: 'Admin access required.' });
   const g = k => url.searchParams.get(k) || '';
-  if (p === 'me') return j(200, { user: sess.user, role: sess.role, owner: sess.user === OWNER(), test_mode: TESTPAY() });
+  if (p === 'me') return j(200, { user: sess.user, role: sess.role, owner: sess.user === OWNER(), test_mode: TESTPAY(), locs: LOCS });
   if (p === 'users') return j(200, { owner: OWNER(), users: db.prepare('SELECT id,username,name,role,active,created_at,last_login FROM users ORDER BY username').all() });
   if (p === 'audit') {
     const from = g('from'), to = g('to'), usr = g('user'), act = g('action'), q = g('q').toLowerCase();
@@ -156,9 +191,9 @@ async function adminApi(req, res, url, sess) {
     return j(200, { guests: list.slice(0, 500), count: list.length });
   }
   if (p === 'report') {
-    const from = g('from'), to = g('to'), grp = g('group') === 'month' ? 'month' : 'day', basis = g('basis') === 'paid' ? 'paid' : 'play';
+    const lc = g('loc'), from = g('from'), to = g('to'), grp = g('group') === 'month' ? 'month' : 'day', basis = g('basis') === 'paid' ? 'paid' : 'play';
     const dateOf = b => basis === 'paid' ? toIstDate(b.paid_at || b.created_at) : b.date;
-    const sel = db.prepare(`SELECT * FROM bookings WHERE status IN ('confirmed','cancelled')`).all().filter(b => { const d = dateOf(b); return !b.is_test && (!from || d >= from) && (!to || d <= to); });
+    const sel = db.prepare(`SELECT * FROM bookings WHERE status IN ('confirmed','cancelled')`).all().filter(b => { const d = dateOf(b); return !b.is_test && (!lc || b.loc === lc) && (!from || d >= from) && (!to || d <= to); });
     const blank = k => ({ period: k, bookings: 0, people: 0, table_fees: 0, rental_fees: 0, gross: 0, collected: 0, refunded: 0, refund_pending: 0, cancelled: 0, net: 0 }), groups = new Map();
     for (const b of sel) {
       const d = dateOf(b), k = grp === 'month' ? d.slice(0, 7) : d; let a = groups.get(k); if (!a) groups.set(k, a = blank(k));
@@ -168,19 +203,21 @@ async function adminApi(req, res, url, sess) {
     }
     const list = [...groups.values()].sort((a, b) => a.period.localeCompare(b.period)); list.forEach(a => a.net = a.collected - a.refunded - a.refund_pending);
     const tot = blank('Total'); list.forEach(a => { for (const k of Object.keys(tot)) if (k !== 'period') tot[k] += a[k]; });
-    const payments = sel.filter(b => b.pay_status === 'Paid' || b.refund_status).map(b => ({ date: dateOf(b), play_date: b.date, id: b.id, name: b.name, phone: b.phone, method: b.pay_method, payment_id: b.payment_id || '', txnid: b.order_id || '', amount: b.total, pay_status: b.pay_status, status: b.status, refund_status: b.refund_status || '', paid_at: b.paid_at || b.created_at || '' })).sort((a, b) => b.date.localeCompare(a.date));
+    const payments = sel.filter(b => b.pay_status === 'Paid' || b.refund_status).map(b => ({ location: locName(b.loc), date: dateOf(b), play_date: b.date, id: b.id, name: b.name, phone: b.phone, method: b.pay_method, payment_id: b.payment_id || '', txnid: b.order_id || '', amount: b.total, pay_status: b.pay_status, status: b.status, refund_status: b.refund_status || '', paid_at: b.paid_at || b.created_at || '' })).sort((a, b) => b.date.localeCompare(a.date));
     return j(200, { groups: list, totals: tot, payments });
   }
   if (p === 'day') {
     const d = url.searchParams.get('date') || now.d;
-    const b = db.prepare(`SELECT * FROM bookings WHERE date=? AND (status='confirmed' OR (status='held' AND hold_until>?)) ORDER BY start`).all(d, Date.now());
-    return j(200, { date: d, tables: CFG.tables, bookings: b, blocks: db.prepare('SELECT * FROM blocks WHERE date=? ORDER BY start').all(d), sets: { total: getSet('sets_total', CFG.sets), damaged: getSet('sets_damaged', 0), booked: b.reduce((a, x) => a + x.sets, 0) } });
+    const loc = LOCS[g('loc')] ? g('loc') : DEFAULT_LOC;
+    const b = db.prepare(`SELECT * FROM bookings WHERE date=? AND loc=? AND (status='confirmed' OR (status='held' AND hold_until>?)) ORDER BY start`).all(d, loc, Date.now());
+    return j(200, { date: d, loc, tables: CFG.tables, bookings: b, blocks: db.prepare('SELECT * FROM blocks WHERE date=? AND loc=? ORDER BY start').all(d, loc), sets: { total: getSet(skey('sets_total', loc), CFG.sets), damaged: getSet(skey('sets_damaged', loc), 0), booked: b.reduce((a, x) => a + x.sets, 0) } });
   }
   if (p === 'bookings') {
     const g = k => url.searchParams.get(k) || '', q = g('q').toLowerCase().trim(), qd = q.replace(/\D/g, ''), pm = g('pm'), ps = g('ps'), st = g('st') || 'active', from = g('from'), to = g('to');
     let r = db.prepare('SELECT * FROM bookings ORDER BY date DESC,start DESC').all();
     r = r.filter(b => {
       if (st === 'any' ? false : st === 'active' ? !['confirmed', 'held'].includes(b.status) : st === 'all' ? b.status === 'failed' : b.status !== st) return false;
+      if (g('loc') && b.loc !== g('loc')) return false;
       if (pm === 'online' && b.pay_method !== 'Online') return false;
       if (pm === 'venue' && b.pay_method === 'Online') return false;
       if (ps === 'paid' && b.pay_status !== 'Paid') return false;
@@ -195,7 +232,7 @@ async function adminApi(req, res, url, sess) {
     return j(200, { bookings: r.slice(0, 500), totals: { count: r.length, players: sum(ok, b => b.players), game: sum(ok, b => b.game_fee), rental: sum(ok, b => b.rental_fee), total: sum(ok, b => b.total), paid: sum(ok.filter(b => b.pay_status === 'Paid'), b => b.total), pending: sum(ok.filter(b => b.pay_status !== 'Paid'), b => b.total), online: sum(ok.filter(b => b.pay_method === 'Online'), b => b.total), cancelled: r.filter(b => b.status === 'cancelled').length, refunds: r.filter(b => b.refund_status === 'Refund due' || b.refund_status === 'Refund failed').length } });
   }
   if (p === 'booking') { const b = db.prepare('SELECT * FROM bookings WHERE id=?').get(url.searchParams.get('id') || ''); return b ? j(200, { booking: b }) : j(404, { error: 'Not found' }); }
-  if (p === 'blocks') return j(200, { blocks: db.prepare('SELECT * FROM blocks WHERE date>=? ORDER BY date,start').all(now.d) });
+  if (p === 'blocks') return j(200, { blocks: db.prepare('SELECT * FROM blocks WHERE date>=? AND loc=? ORDER BY date,start').all(now.d, LOCS[g('loc')] ? g('loc') : DEFAULT_LOC) });
   if (req.method !== 'POST') return j(404, { error: 'Not found' });
   const x = await body(req), live = id => db.prepare(`SELECT * FROM bookings WHERE id=? AND status IN ('confirmed','held')`).get(id || '');
   if (p === 'cancel') {
@@ -220,23 +257,23 @@ async function adminApi(req, res, url, sess) {
     const b = live(x.id), t = +x.tbl; if (!b) return j(404, { error: 'Booking not found.' });
     if (!(t >= 0 && t < CFG.tables)) return j(400, { error: 'Invalid table.' });
     db.exec('BEGIN IMMEDIATE');
-    if (allocate(b.date, b.start, b.type, b.players, b.sets, b.id, t) < 0) { db.exec('ROLLBACK'); return j(409, { error: 'That table is not free (or is blocked) at that time.' }); }
+    if (allocate(b.date, b.start, b.type, b.players, b.sets, b.id, t, b.loc) < 0) { db.exec('ROLLBACK'); return j(409, { error: 'That table is not free (or is blocked) at that time.' }); }
     db.prepare('UPDATE bookings SET tbl=? WHERE id=?').run(t, b.id); db.exec('COMMIT'); audit(req, sess.user, 'move_booking', b.id + ' to table ' + (t + 1));
     return j(200, { ok: true });
   }
   if (p === 'block') {
-    const t = +x.tbl, st = +x.start, en = +x.end;
+    const t = +x.tbl, st = +x.start, en = +x.end, loc = LOCS[x.loc] ? x.loc : DEFAULT_LOC;
     if (!/^\d{4}-\d{2}-\d{2}$/.test(x.date || '') || !(t >= -1 && t < CFG.tables) || !(st >= CFG.open && en <= CFG.close && en > st)) return j(400, { error: 'Invalid date, table or time.' });
     let conflicts = 0;
     for (const tt of t === -1 ? [0, 1, 2, 3] : [t]) {
-      db.prepare('INSERT INTO blocks(tbl,date,start,end,reason) VALUES(?,?,?,?,?)').run(tt, x.date, st, en, String(x.reason || '').slice(0, 100));
-      conflicts += db.prepare(`SELECT COUNT(*) c FROM bookings WHERE status='confirmed' AND date=? AND tbl=? AND start<? AND start+?>?`).get(x.date, tt, en, CFG.dur, st).c;
+      db.prepare('INSERT INTO blocks(tbl,date,start,end,reason,loc) VALUES(?,?,?,?,?,?)').run(tt, x.date, st, en, String(x.reason || '').slice(0, 100), loc);
+      conflicts += db.prepare(`SELECT COUNT(*) c FROM bookings WHERE status='confirmed' AND date=? AND tbl=? AND loc=? AND start<? AND start+?>?`).get(x.date, tt, loc, en, CFG.dur, st).c;
     }
-    audit(req, sess.user, 'block_table', (t === -1 ? 'all tables' : 'table ' + (t + 1)) + ' ' + x.date + ' ' + st + '-' + en + ' ' + String(x.reason || ''));
+    audit(req, sess.user, 'block_table', locName(loc) + ' ' + (t === -1 ? 'all tables' : 'table ' + (t + 1)) + ' ' + x.date + ' ' + st + '-' + en + ' ' + String(x.reason || ''));
     return j(200, { ok: true, conflicts });
   }
   if (p === 'book') { // staff-created (phone / walk-in) booking
-    const n = +x.players, q = +x.sets || 0, st = +x.start, only = (x.tbl === '' || x.tbl == null || +x.tbl < 0) ? undefined : +x.tbl;
+    const loc = LOCS[x.loc] ? x.loc : DEFAULT_LOC, n = +x.players, q = +x.sets || 0, st = +x.start, only = (x.tbl === '' || x.tbl == null || +x.tbl < 0) ? undefined : +x.tbl;
     const errs = [];
     if (!/^\d{4}-\d{2}-\d{2}$/.test(x.date || '') || x.date < now.d) errs.push('Choose today or a future date.');
     if (!Number.isInteger(st) || st < CFG.open || st + CFG.dur > CFG.close || (st - CFG.open) % CFG.step) errs.push('Invalid time.');
@@ -248,10 +285,10 @@ async function adminApi(req, res, url, sess) {
     if (x.email && !/^\S+@\S+\.\S+$/.test(x.email)) errs.push('Email looks invalid (leave it empty if unknown).');
     if (errs.length) return j(400, { error: errs.join(' ') });
     db.exec('BEGIN IMMEDIATE');
-    const t = allocate(x.date, st, x.type, n, q, undefined, only);
+    const t = allocate(x.date, st, x.type, n, q, undefined, only, loc);
     if (t < 0) { db.exec('ROLLBACK'); return j(409, { error: 'No table (or not enough rental sets) free for that time.' }); }
-    const b = { id: refId(), name: String(x.name).trim(), phone: String(x.phone).replace(/\D/g, ''), email: String(x.email || '').trim(), date: x.date, start: st, players: n, type: x.type, tbl: t, sets: q, game_fee: CFG.fee, rental_fee: q * CFG.rent, total: CFG.fee + q * CFG.rent, pay_method: 'Pay at venue', pay_status: x.paid ? 'Paid' : 'Pending', requests: String(x.requests || '').slice(0, 500) };
-    db.prepare(`INSERT INTO bookings(id,name,phone,email,date,start,players,type,tbl,sets,game_fee,rental_fee,total,pay_method,pay_status,requests,status,hold_until) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'confirmed',NULL)`).run(b.id, b.name, b.phone, b.email, b.date, b.start, b.players, b.type, b.tbl, b.sets, b.game_fee, b.rental_fee, b.total, b.pay_method, b.pay_status, b.requests);
+    const b = { id: refId(), loc, name: String(x.name).trim(), phone: String(x.phone).replace(/\D/g, ''), email: String(x.email || '').trim(), date: x.date, start: st, players: n, type: x.type, tbl: t, sets: q, game_fee: CFG.fee, rental_fee: q * CFG.rent, total: CFG.fee + q * CFG.rent, pay_method: 'Pay at venue', pay_status: x.paid ? 'Paid' : 'Pending', requests: String(x.requests || '').slice(0, 500) };
+    db.prepare(`INSERT INTO bookings(id,name,phone,email,date,start,players,type,tbl,sets,game_fee,rental_fee,total,pay_method,pay_status,requests,status,hold_until,loc) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'confirmed',NULL,?)`).run(b.id, b.name, b.phone, b.email, b.date, b.start, b.players, b.type, b.tbl, b.sets, b.game_fee, b.rental_fee, b.total, b.pay_method, b.pay_status, b.requests, b.loc);
     db.exec('COMMIT');
     notifyBooked(b);
     return j(201, { ok: true, booking: b });
@@ -292,7 +329,7 @@ async function adminApi(req, res, url, sess) {
   if (p === 'settings') {
     const up = (k, v) => db.prepare('INSERT INTO settings(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v').run(k, String(v));
     const tot = Math.max(0, Math.min(200, +x.sets_total | 0)), dmg = Math.max(0, Math.min(tot, +x.sets_damaged | 0));
-    up('sets_total', tot); up('sets_damaged', dmg); audit(req, sess.user, 'rental_sets', 'total ' + tot + ', damaged ' + dmg);
+    const sl = LOCS[x.loc] ? x.loc : DEFAULT_LOC; up(skey('sets_total', sl), tot); up(skey('sets_damaged', sl), dmg); audit(req, sess.user, 'rental_sets', locName(sl) + ': total ' + tot + ', damaged ' + dmg);
     return j(200, { ok: true, available: tot - dmg });
   }
   return j(404, { error: 'Not found' });
@@ -336,7 +373,7 @@ const TOO_MANY = { error: 'Too many attempts. Please try again in 15 minutes, or
 function cancelRow(b) {
   const refund = b.pay_method === 'Online' && b.pay_status === 'Paid' && !b.is_test;
   db.prepare(`UPDATE bookings SET status='cancelled',cancelled_at=?,refund_status=? WHERE id=?`).run(new Date().toISOString(), refund ? 'Refund due' : null, b.id);
-  if (refund) sendMail(STAFF_EMAIL, 'REFUND DUE: ' + b.id, '<p>Booking ' + b.id + ' (' + esc(b.name) + ', ' + esc(b.phone) + ') was cancelled and paid online: ₹' + b.total + '. Open the admin dashboard to refund it via PayU.</p>');
+  if (refund) alertMail('REFUND DUE: ' + b.id, 'Refund due', 'This booking was cancelled and had been paid online. Open the admin dashboard and use the Refund button.', b, [['Payment ID', esc(b.payment_id || '')]]);
   return refund;
 }
 async function payuRefund(b) {
@@ -356,9 +393,9 @@ http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
   try {
     if (url.pathname === '/api/occupancy') // anonymised: no guest data
-      return json(res, 200, [...blockOcc(), ...db.prepare(`SELECT id,date,start,players,type,tbl AS "table",sets,status FROM bookings WHERE (status='confirmed' OR (status='held' AND hold_until>${Date.now()})) AND date>=?`).all(istNow().d)]);
+      return json(res, 200, [...blockOcc(), ...db.prepare(`SELECT id,date,start,players,type,tbl AS "table",sets,status,loc FROM bookings WHERE (status='confirmed' OR (status='held' AND hold_until>${Date.now()})) AND date>=?`).all(istNow().d)]);
 
-    if (url.pathname === '/api/config') return json(res, 200, { enabled: PAYU() || TESTPAY(), test: E.PAYU_ENV === 'test', free: TESTPAY(), sets: setsAvail() });
+    if (url.pathname === '/api/config') return json(res, 200, { enabled: PAYU() || TESTPAY(), test: E.PAYU_ENV === 'test', free: TESTPAY(), sets: setsAvail(), setsByLoc: Object.fromEntries(Object.keys(LOCS).map(l => [l, setsAvail(l)])), locs: LOCS });
 
     if (url.pathname === '/api/pay/start' && req.method === 'POST') { // retry payment for a held booking
       const x = await body(req);
@@ -371,7 +408,7 @@ http.createServer(async (req, res) => {
     if (url.pathname === '/api/booking/lookup' && req.method === 'POST') { // guest finds own booking: reference + email must both match
       if (limited(req)) return json(res, 429, TOO_MANY);
       const x = await body(req);
-      const b = db.prepare(`SELECT id,name,date,start,players,type,sets,game_fee,rental_fee,total,pay_method,pay_status,status,refund_status FROM bookings WHERE upper(id)=upper(?) AND lower(email)=lower(?) AND status IN ('confirmed','cancelled','held')`).get(String(x.id || '').trim(), String(x.email || '').trim());
+      const b = db.prepare(`SELECT id,name,date,start,players,type,sets,game_fee,rental_fee,total,pay_method,pay_status,status,refund_status,loc FROM bookings WHERE upper(id)=upper(?) AND lower(email)=lower(?) AND status IN ('confirmed','cancelled','held')`).get(String(x.id || '').trim(), String(x.email || '').trim());
       return b ? json(res, 200, { booking: b }) : json(res, 404, { error: "We couldn't find a booking with those details. Please check the reference and email." });
     }
 
@@ -399,6 +436,7 @@ http.createServer(async (req, res) => {
       if (!Number.isInteger(x.start) || x.start < CFG.open || x.start + CFG.dur > CFG.close || (x.start - CFG.open) % CFG.step) errs.push('Invalid time.');
       if (x.date === now.d && x.start <= now.m) errs.push('That time has passed.');
       x.type = 'private'; // whole-table bookings only
+      if (!LOCS[x.loc]) errs.push('Please select a location.');
       if (!(n >= 1 && n <= 4)) errs.push('Players must be 1 to 4.');
       if (!(q >= 0 && q <= 4)) errs.push('Invalid number of sets.');
       if (String(x.name || '').trim().length < 2) errs.push('Name required.');
@@ -411,11 +449,11 @@ http.createServer(async (req, res) => {
       let b;
       db.exec('BEGIN IMMEDIATE'); // atomic: no two guests can take the same capacity
       try {
-        const t = allocate(x.date, x.start, x.type, n, q);
+        const t = allocate(x.date, x.start, x.type, n, q, undefined, undefined, x.loc);
         if (t < 0) { db.exec('ROLLBACK'); return json(res, 409, { error: 'Sorry, that capacity was just taken. Please pick another slot.' }); }
-        b = { id: refId(), name: String(x.name).trim(), phone: String(x.phone).replace(/\D/g, ''), email: x.email.trim(), date: x.date, start: x.start, players: n, type: x.type, tbl: t, sets: q, game_fee: CFG.fee, rental_fee: q * CFG.rent, total: CFG.fee + q * CFG.rent, pay_method: online ? 'Online' : 'Pay at venue', pay_status: online ? 'Awaiting payment' : 'Pending', requests: String(x.requests || '').slice(0, 500) };
-        db.prepare(`INSERT INTO bookings(id,name,phone,email,date,start,players,type,tbl,sets,game_fee,rental_fee,total,pay_method,pay_status,requests,status,hold_until) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-          .run(b.id, b.name, b.phone, b.email, b.date, b.start, b.players, b.type, b.tbl, b.sets, b.game_fee, b.rental_fee, b.total, b.pay_method, b.pay_status, b.requests, online ? 'held' : 'confirmed', online ? Date.now() + HOLD * 60000 : null);
+        b = { id: refId(), name: String(x.name).trim(), phone: String(x.phone).replace(/\D/g, ''), email: x.email.trim(), date: x.date, start: x.start, players: n, type: x.type, tbl: t, sets: q, game_fee: CFG.fee, rental_fee: q * CFG.rent, total: CFG.fee + q * CFG.rent, loc: x.loc, pay_method: online ? 'Online' : 'Pay at venue', pay_status: online ? 'Awaiting payment' : 'Pending', requests: String(x.requests || '').slice(0, 500) };
+        db.prepare(`INSERT INTO bookings(id,name,phone,email,date,start,players,type,tbl,sets,game_fee,rental_fee,total,pay_method,pay_status,requests,status,hold_until,loc) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+          .run(b.id, b.name, b.phone, b.email, b.date, b.start, b.players, b.type, b.tbl, b.sets, b.game_fee, b.rental_fee, b.total, b.pay_method, b.pay_status, b.requests, online ? 'held' : 'confirmed', online ? Date.now() + HOLD * 60000 : null, b.loc);
         db.exec('COMMIT');
       } catch (e) { db.exec('ROLLBACK'); throw e; }
       if (online && TESTPAY()) { // testing: no payment, confirm straight away and mark as TEST
@@ -476,6 +514,11 @@ http.createServer(async (req, res) => {
       return res.end(`<meta name=viewport content="width=device-width"><body style="font:14px sans-serif;padding:16px"><h2>Mahjong Madness bookings</h2><p><a href="/admin/export.csv">Export CSV</a> · ${rows.length} total</p><div style="overflow-x:auto"><table border=1 cellpadding=6 style="border-collapse:collapse"><tr><th>Ref<th>Date<th>Time<th>Guest<th>Mobile<th>Email<th>Players<th>Type<th>Table<th>Sets<th>Total<th>Payment<th>Status<th>Requests<th>Email status</tr>${rows.map(r => `<tr><td>${r.id}<td>${r.date}<td>${rng(r.start)}<td>${esc(r.name)}<td>${r.phone}<td>${esc(r.email)}<td>${r.players}<td>${typeLbl(r.type)}<td>${r.tbl + 1}<td>${r.sets}<td>₹${r.total}<td>${r.pay_method} (${r.pay_status}) ${r.payment_id || ''}<td>${r.status}<td>${esc(r.requests)}<td>${r.email_status || ''}</tr>`).join('')}</table></div>`);
     }
 
+    if (url.pathname === '/robots.txt' || url.pathname === '/sitemap.xml') {
+      const base = E.PUBLIC_URL || ('https://' + req.headers.host);
+      res.writeHead(200, { 'Content-Type': url.pathname === '/robots.txt' ? 'text/plain' : 'application/xml' });
+      return res.end(url.pathname === '/robots.txt' ? 'User-agent: *\nAllow: /\nDisallow: /admin\nSitemap: ' + base + '/sitemap.xml\n' : '<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>' + base + '/</loc></url></urlset>');
+    }
     if (url.pathname === '/' || url.pathname === '/index.html') { const page = fs.readFileSync(new URL('./index.html', import.meta.url)); res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); return res.end(page); }
     res.writeHead(404); res.end('Not found');
   } catch (e) { console.error(e); if (res.headersSent) return res.end(); json(res, 500, { error: 'Something went wrong. Please try again.' }); }
