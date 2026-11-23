@@ -85,7 +85,7 @@ h3[id^="st-"]{scroll-margin-top:110px}#locs .opt{flex:1 1 200px;text-align:cente
 <section class="navy" id="book"><div class="w"><h2>The table is yours. Book it.</h2>
 
 <div class="bk" id="bk">
-<h3 id="st-loc">Select the location.</h3><p class="sub">Choose where you'd like to play.</p><div class="opts" id="locs"><button class="chip opt" data-loc="vasanth-nagar" aria-pressed="false"><b>Watson's Vasanth Nagar</b></button><button class="chip opt" data-loc="ulsoor" aria-pressed="false"><b>Watson's Ulsoor</b></button><button class="chip opt" data-loc="indiranagar" aria-pressed="false"><b>Watson's Indiranagar</b></button><button class="chip opt" data-loc="starlight" aria-pressed="false"><b>STARLIGHT BAR &amp; RESTAURANT</b></button></div>
+<h3 id="st-loc">Select the location.</h3><p class="sub">Choose where you'd like to play.</p><div class="opts" id="locs"><button class="chip opt" data-loc="vasanth-nagar" aria-pressed="false"><b>Watson's Vasanth Nagar</b></button><button class="chip opt" data-loc="ulsoor" aria-pressed="false"><b>Watson's Ulsoor</b></button><button class="chip opt" data-loc="indiranagar" aria-pressed="false"><b>Watson's Indiranagar</b></button><button class="chip opt" data-loc="starlight" aria-pressed="false"><b>STARLIGHT</b></button></div>
 <h3 id="st-date">When are we playing?</h3><p class="sub">Pick a date and let's get your Mahjong afternoon sorted.</p><div class="days" id="days"></div><div class="legend">Green: available · Amber: limited · Dashed: fully booked / unavailable</div>
 <h3 id="st-time">Pick your time.</h3><p class="sub">Settle in for your Mahjong game.</p><div class="times" id="times"><span class="sub">Choose a date first.</span></div>
 <h3>Your table.</h3><p class="sub"><b>₹1,000 reserves one whole Mahjong table.</b></p><h3>Have you got your tiles?</h3><div class="opts"><button class="chip opt" data-set="own" aria-pressed="true"><b>I'LL BRING MY OWN SET</b>No rental fee.</button><button class="chip opt" data-set="rent" aria-pressed="false"><b>RENT A SET AT THE VENUE</b>₹500 per Mahjong set.</button></div>
@@ -119,7 +119,7 @@ document.getElementById('faq').innerHTML=FAQ.map(([q,a])=>`<details><summary>${q
 const CFG={tables:4,cap:4,fee:1000,rent:500,sets:8,open:720,close:1200,dur:120,step:30,days:30};
 let DB;try{DB=JSON.parse(localStorage.getItem('mm_bookings')||'[]')}catch(e){DB=[]}
 const save=()=>{try{localStorage.setItem('mm_bookings',JSON.stringify(DB))}catch(e){}};
-const S={date:null,start:null,type:'private',set:'own',loc:null},LOCN={'vasanth-nagar':"Watson's Vasanth Nagar",'ulsoor':"Watson's Ulsoor",'indiranagar':"Watson's Indiranagar",'starlight':'STARLIGHT BAR & RESTAURANT'};
+const S={date:null,start:null,type:'private',set:'own',loc:null},LOCN={'vasanth-nagar':"Watson's Vasanth Nagar",'ulsoor':"Watson's Ulsoor",'indiranagar':"Watson's Indiranagar",'starlight':'STARLIGHT'};
 const $=id=>document.getElementById(id);
 const pad=n=>String(n).padStart(2,'0'),fmt=m=>{let h=Math.floor(m/60),mm=m%60;return(h%12||12)+(mm?':'+pad(mm):'')+' '+(h<12?'AM':'PM')};
 const rng=s=>fmt(s)+' – '+fmt(s+CFG.dur);
