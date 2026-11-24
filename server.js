@@ -9,7 +9,7 @@ const E = process.env;
 const PORT = E.PORT || 3000;
 const CFG = { tables: 4, cap: 4, fee: 1000, rent: 500, sets: +(E.RENTAL_SETS || 8), open: 720, close: 1200, dur: 120, step: 30 };
 const STAFF_EMAIL = [...new Set([...(E.STAFF_EMAIL || 'murali.dg@shiltonhospitality.com').split(','), ...(E.STAFF_EMAIL_2 || 'alkanagpal@hotmail.com').split(',')].map(x => x.trim()).filter(Boolean))]; // everyone who gets booking alerts
-const LOCS = { 'vasanth-nagar': "Watson's Vasanth Nagar", 'ulsoor': "Watson's Ulsoor", 'indiranagar': "Watson's Indiranagar", 'starlight': 'STARLIGHT' };
+const LOCS = { 'vasanth-nagar': "Watson's Vasanth Nagar", 'ulsoor': "Watson's Ulsoor", 'indiranagar': "Watson's Indiranagar", 'starlight': 'STAR LIGHT Sahakar Nagar' };
 const DEFAULT_LOC = 'vasanth-nagar', locName = l => LOCS[l] || LOCS[DEFAULT_LOC];
 const db = new DatabaseSync(E.DB_PATH || 'bookings.db');
 db.exec(`CREATE TABLE IF NOT EXISTS bookings(
