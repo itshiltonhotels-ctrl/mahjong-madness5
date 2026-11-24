@@ -88,12 +88,12 @@ h3[id^="st-"]{scroll-margin-top:110px}#locs .opt{flex:1 1 200px;text-align:cente
 <h3 id="st-loc">Select the location.</h3><p class="sub">Choose where you'd like to play.</p><div class="opts" id="locs"><button class="chip opt" data-loc="vasanth-nagar" aria-pressed="false"><b>Watson's Vasanth Nagar</b></button><button class="chip opt" data-loc="ulsoor" aria-pressed="false"><b>Watson's Ulsoor</b></button><button class="chip opt" data-loc="indiranagar" aria-pressed="false"><b>Watson's Indiranagar</b></button><button class="chip opt" data-loc="starlight" aria-pressed="false"><b>STARLIGHT</b></button></div>
 <h3 id="st-date">When are we playing?</h3><p class="sub">Pick a date and let's get your Mahjong afternoon sorted.</p><div class="days" id="days"></div><div class="legend">Green: available · Amber: limited · Dashed: fully booked / unavailable</div>
 <h3 id="st-time">Pick your time.</h3><p class="sub">Settle in for your Mahjong game.</p><div class="times" id="times"><span class="sub">Choose a date first.</span></div>
-<h3>Your table.</h3><p class="sub"><b>₹1,000 reserves one whole Mahjong table.</b></p><h3>Have you got your tiles?</h3><div class="opts"><button class="chip opt" data-set="own" aria-pressed="true"><b>I'LL BRING MY OWN SET</b>No rental fee.</button><button class="chip opt" data-set="rent" aria-pressed="false"><b>RENT A SET AT THE VENUE</b>₹500 per Mahjong set.</button></div>
+<h3>Your table.</h3><p class="sub"><b>₹1,000 reserves one whole Mahjong table.</b></p><h3 id="dtl">Just a few details.</h3><div class="f2"><div><label for="nm">Full name</label><input id="nm" autocomplete="name"></div><div><label for="ph">Mobile number</label><input id="ph" type="tel" autocomplete="tel"></div><div><label for="em">Email address</label><input id="em" type="email" autocomplete="email"></div><div><label for="pl">Number of people</label><select id="pl"><option>1</option><option>2</option><option>3</option><option>4</option></select></div></div>
+<h3>Have you got your tiles?</h3><div class="opts"><button class="chip opt" data-set="own" aria-pressed="true"><b>I'LL BRING MY OWN SET</b>No rental fee.</button><button class="chip opt" data-set="rent" aria-pressed="false"><b>RENT A SET AT THE VENUE</b>₹500 per Mahjong set.</button></div>
 <div id="setqty" hidden><label for="sets">Number of sets to rent</label><select id="sets"><option>1</option><option>2</option><option>3</option><option>4</option></select></div>
-<h3>Just a few details.</h3><div class="f2"><div><label for="nm">Full name</label><input id="nm" autocomplete="name"></div><div><label for="ph">Mobile number</label><input id="ph" type="tel" autocomplete="tel"></div><div><label for="em">Email address</label><input id="em" type="email" autocomplete="email"></div><div><label for="pl">Number of people</label><select id="pl"><option>1</option><option>2</option><option>3</option><option>4</option></select></div></div>
 <label for="rq">Special requests (optional)</label><textarea id="rq" rows="2"></textarea>
-<label style="display:flex;gap:8px;align-items:center"><input id="ag" type="checkbox" style="width:auto"> I agree to the <a href="#terms" target="_blank">booking terms and cancellation policy</a>.</label>
-<h3>Almost time to play.</h3><table class="s" id="sum"></table><p class="sub">Food and beverages are not included.</p>
+<label id="agl" style="display:flex;gap:8px;align-items:center"><input id="ag" type="checkbox" style="width:auto"> I agree to the <a href="#terms" target="_blank">booking terms and cancellation policy</a>.</label>
+<h3 id="sumh">Almost time to play.</h3><table class="s" id="sum"></table><p class="sub">Food and beverages are not included.</p>
 <h3>Pay online to confirm.</h3><div class="opts"><button class="chip opt" disabled aria-pressed="true"><b>PAY ONLINE</b>Pay securely through the configured payment gateway. (Not yet configured. Needs Razorpay credentials and a server.)</button></div>
 <p><button class="btn" id="go">BOOK YOUR TABLE.</button></p><div class="msg" id="msg" role="alert"></div>
 <div id="done" hidden></div>
@@ -252,4 +252,24 @@ async function findBk(){const id=$('fr').value.trim(),em=$('fe').value.trim();$(
  }catch(e){fm(e.message)}
  $('fgo').disabled=false}
 $('fgo').onclick=findBk;
+</script><script>
+// ---- guided booking flow: time -> your details -> agree -> payment ----
+(()=>{const go=(el,pos)=>{if(el)el.scrollIntoView({behavior:'smooth',block:pos||'start'})};let timer=null;
+ const okName=()=>$('nm').value.trim().length>=2,okPh=()=>/^(91)?[6-9]\d{9}$/.test($('ph').value.replace(/\D/g,'')),okEm=()=>/^\S+@\S+\.\S+$/.test($('em').value.trim());
+ // 1. choosing a time takes the guest straight to the name field
+ document.addEventListener('click',e=>{const t=e.target.closest('[data-s]');if(t&&!t.disabled)setTimeout(()=>{go($('dtl'));setTimeout(()=>$('nm').focus({preventScroll:true}),550)},150)});
+ // Enter moves to the next field
+ $('nm').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();$('ph').focus()}});
+ $('ph').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();$('em').focus()}});
+ $('em').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();$('em').blur()}});
+ // 2. once name, mobile and email are filled, bring the agree box into view
+ $('em').addEventListener('blur',()=>setTimeout(()=>{if(okName()&&okPh()&&okEm()&&!$('ag').checked)go($('agl'),'center')},150));
+ const problem=()=>!S.loc?[$('locs'),'Please select a location first.']:!S.date?[$('st-date'),'Please choose a date.']:S.start==null?[$('st-time'),'Please pick a time.']:!okName()?[$('nm'),'Please enter your full name.']:!okPh()?[$('ph'),'Please enter a valid 10-digit mobile number.']:!okEm()?[$('em'),'Please enter a valid email address.']:null;
+ // 3. ticking agree goes to the payment section and starts payment after a short pause (untick to cancel)
+ $('ag').addEventListener('change',()=>{clearTimeout(timer);
+  if(!$('ag').checked){$('msg').className='msg';return}
+  const p=problem();if(p){$('ag').checked=false;go(p[0],'center');if(p[0].focus)setTimeout(()=>p[0].focus({preventScroll:true}),500);err(p[1]);return}
+  go($('sumh'));err('Thank you. Taking you to the secure payment page in 2 seconds. Untick the box to cancel.',true);
+  timer=setTimeout(()=>{if($('ag').checked&&!$('go').disabled)$('go').click()},2000)});
+})();
 </script></body></html>
